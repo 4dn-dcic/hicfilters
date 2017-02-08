@@ -1000,6 +1000,8 @@ def parseInputs():
     parser = argparse.ArgumentParser(description='Filter Hi-C reads in BAM files.')
     parser.add_argument('-i', '--in', nargs=1, required=True,
                         help='Input BAM file')
+    parser.add_argument('-r', '--re', nargs=1, required=True,
+                        help='bgzipped bed file containing restriction enzyme sites')
     parser.add_argument('-o', '--out', nargs=1, required=True,
                         help='Output BAM file')
     parser.add_argument('-v', '--verbose', action='store_const',
@@ -1007,17 +1009,17 @@ def parseInputs():
                         help='Verbose mode')
     args = vars(parser.parse_args())
     bam = args['in'][0]
+    rebed = args['re'][0]
     outbam = args['out'][0]
     verbose = args['verbose']
-    return bam, outbam, verbose
+    return bam, rebed, outbam, verbose
 
 #############################################
 def main():
     # Parse input arguments
-    bam, outbam, verbose = parseInputs()
-    tabix = '/n/data1/hms/dbmi/park/chris_nam/data/hg19/hg19_MboI.bed.gz'
+    bam, rebed, outbam, verbose = parseInputs()
     # Parse BAM file
-    parseBAM(bam, outbam, tabix, verbose=verbose)
+    parseBAM(bam, outbam, rebed, verbose=verbose)
 
 #############################################
 if __name__ == '__main__':
