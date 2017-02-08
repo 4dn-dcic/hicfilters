@@ -6,6 +6,8 @@ This README provides documentation for the script `filterHiCReads.py`. The scrip
 Chris Nam, at Harvard Medical School.
 
 ### Dependencies
+Python version >=2.7
+
 ```
 pip install pysam==0.8.4
 pip install biopython
