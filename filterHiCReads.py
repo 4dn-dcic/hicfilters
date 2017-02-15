@@ -33,6 +33,10 @@ class Fragment(object):
         return '%s - [%d, %d] (%d)' % (self.chrom, self.site1, self.site2, self.index)
 
     ##############################################
+    def __repr__(self):
+        return str(self)
+
+    ##############################################
     def __eq__(self, other):
         if type(other) is type(self):
             return self.__dict__ == other.__dict__
@@ -56,13 +60,6 @@ class Fragment(object):
             else:
                 return abs(self.index - other.index)
         return NotImplemented
-
-##############################################
-def printObjectsList(objects):
-    """
-    Print a list of objects by applying str() to each object.
-    """
-    print('[%s]' % ', '.join(map(str, objects)))
 
 ##############################################
 def reverseComplement(seq):
@@ -470,9 +467,9 @@ class HiCPair(object):
     """
     Class definitions for a HiCPair object.
     """
-    def __init__(self, reads=None, chrs='all', enzyme='MboI', mapq_threshold=30,
-                 sep_threshold=1000, res_site_dist_threshold=750,
-                 min_insert_size=0, max_insert_size=1000, fragments=None):
+    def __init__(self, reads=None, chrs='all', ligseq=None, cutlength=None,
+                 mapq_threshold=30, sep_threshold=1000, res_site_dist_threshold=750,
+                 min_insert_size=0, max_insert_size=1000, fragments_file=None):
         """
         Constructor for the HiCPair object.
 
@@ -482,9 +479,12 @@ class HiCPair(object):
             Alignments of either read in pair.
         chrs : list of strings, or 'all'
             List of chromosomes.
-        enzyme : str
+        ligseq : str
             Name of restriction enzyme used for digestion. Use None
             for DNase Hi-C and Micro-C.
+        cutlength : int
+            Length of the restriction enzyme site motif. Use None
+            for DNase Hi-C and Micro-C. 
         mapq_threshold : int
             Non-negative integer, ranging between 0 and 255. An
             alignment with MAPQ less than this number is flagged.
@@ -501,8 +501,9 @@ class HiCPair(object):
         max_insert_size : int
             Non-negative integer. A pair whose inferred insert size is
             greater than this number is flagged.
-        fragments : str
-            Path to .bed.gz file containing restriction fragments.
+        fragments_file : pysam.TabixFile
+            TabixFile object for the .bed.gz file containing restriction
+            fragment information.
         """
         self.reads1 = []
         self.reads2 = []
@@ -512,9 +513,8 @@ class HiCPair(object):
         self.nearest_site1 = None
         self.nearest_site2 = None
         self.insert_size = None
-        self.enzyme = enzyme
-        self.ligseq = getLigationSequence(self.enzyme)
-        self.cutlength = len(getRestrictionSequence(self.enzyme))
+        self.ligseq = ligseq
+        self.cutlength = cutlength
         self.separations = None
         self.primary_sep = None
 
@@ -533,12 +533,12 @@ class HiCPair(object):
 
         # Open tabix file of restriction fragments, if specified
         self.fragments = None
-        if self.enzyme is not None and fragments is None:
+        if self.ligseq is not None and fragments_file is None:
             raise Exception('Fragments file should be specified for regular Hi-C data')
-        elif self.enzyme is None and fragments is not None:
+        elif self.ligseq is None and fragments_file is not None:
             raise Exception('Fragments file specified without restriction enzyme')
-        elif fragments is not None:
-            self.fragments = pysam.TabixFile(fragments)
+        elif fragments_file is not None:
+            self.fragments = fragments_file
 
         # Initialize list of standard chromosomes/contigs
         if chrs == 'all':
@@ -572,7 +572,7 @@ class HiCPair(object):
                     self.flagClosePair()
 
                     # Flag pair if reads map to multiple restriction fragments
-                    if self.enzyme is not None:
+                    if self.ligseq is not None:
                         self.assignFragments()
 
         # Update BAM tags
@@ -950,6 +950,9 @@ def parseBAM(bam, outbam, tabix, enzyme='MboI', mapq_threshold=30,
     finished = False
     count = 0
     metadata = defaultdict(int)
+    fragments_file = pysam.TabixFile(tabix)
+    ligseq = getLigationSequence(enzyme)
+    cutlength = len(getRestrictionEnzyme(enzyme))
 
     with pysam.AlignmentFile(bam, 'rb') as bf:
         outbf = pysam.AlignmentFile(outbam, 'wb', template=bf)
@@ -965,9 +968,11 @@ def parseBAM(bam, outbam, tabix, enzyme='MboI', mapq_threshold=30,
             # If we have reached the end of the file or we have reached
             # a new read ID, then process gathered alignment data
             if finished or curr_id != read.query_name:
-                pair = HiCPair(reads=curr_reads, enzyme=enzyme,
+                pair = HiCPair(reads=curr_reads, ligseq=ligseq,
+                               cutlength=cutlength,
                                mapq_threshold=mapq_threshold,
-                               sep_threshold=sep_threshold, fragments=tabix)
+                               sep_threshold=sep_threshold,
+                               fragments_file=fragments_file)
                 if pair.is_unmapped:               metadata['unmapped'] += 1
                 if pair.low_MAPQ:                  metadata['low_MAPQ'] += 1
                 if pair.other_contig:              metadata['other_contig'] += 1
@@ -990,7 +995,12 @@ def parseBAM(bam, outbam, tabix, enzyme='MboI', mapq_threshold=30,
             # Finally, gather alignment data from current read
             curr_reads.append(read)
 
-        outbf.close() 
+        outbf.close()
+
+    print('Finished processing %d read pairs. Flag statistics:' % count)
+    print(dict(metadata))
+
+    fragments_file.close()
 
 #############################################
 def parseInputs():
@@ -1002,21 +1012,21 @@ def parseInputs():
                         help='Input BAM file')
     parser.add_argument('-o', '--out', nargs=1, required=True,
                         help='Output BAM file')
+    parser.add_argument('-f', '--frag', nargs=1, default=None, required=False,
+                        help='Tabix file for restriction fragments')
     parser.add_argument('-v', '--verbose', action='store_const',
                         const=True, default=False, required=False,
                         help='Verbose mode')
     args = vars(parser.parse_args())
     bam = args['in'][0]
     outbam = args['out'][0]
+    tabix = args['frag'][0]
     verbose = args['verbose']
-    return bam, outbam, verbose
+    return bam, outbam, tabix, verbose
 
 #############################################
 def main():
-    # Parse input arguments
-    bam, outbam, verbose = parseInputs()
-    tabix = '/n/data1/hms/dbmi/park/chris_nam/data/hg19/hg19_MboI.bed.gz'
-    # Parse BAM file
+    bam, outbam, tabix, verbose = parseInputs()
     parseBAM(bam, outbam, tabix, verbose=verbose)
 
 #############################################
