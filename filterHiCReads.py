@@ -3,18 +3,29 @@
 """
 Functions for processing BAM files containing aligned Hi-C reads.
 
-This file contains definitions for two classes, Fragment and HiCPair,
-as well as a number of helper functions.
+This file contains definitions for three classes, Fragment, HiCPair,
+and HiCDataset, as well as a number of helper functions.
 """
 
 from __future__ import print_function
 
+import os
+import shutil
 import pysam
 import re
+import math
 import argparse
 from collections import defaultdict
 from Bio.Seq import Seq
 from Bio.Restriction import *
+
+import matplotlib
+matplotlib.use('Agg')
+import numpy as np
+import matplotlib.pyplot as plt
+import seaborn as sns
+import pandas as pd
+import pyupset as pyu
 
 #############################################
 class Fragment(object):
@@ -296,7 +307,7 @@ def combineChimericAlignment(repr, supp, readlength, breakpoint):
         supp_aln = list(enumerate([ x[1] for x in supp_aln ] + [None] * supp_clip3[0]))
 
     # "extend" alignments to incorporate adjacent genomic positions
-    idx, pos = [ x for x in repr_aln if x[1] is not None ][0]
+    idx, pos = next( x for x in repr_aln if x[1] is not None )
     if repr.is_reverse:
         for i in range(idx, readlength):
             repr_aln[i] = (repr_aln[i][0], pos)
@@ -372,10 +383,8 @@ def getFragmentsContiguous(read, tabix, cutlength):
     posright = read.reference_end
     # Correct by restriction enzyme cutter-length, depending
     # on alignment orientation
-    if read.is_reverse:
-        posleft += cutlength
-    else:
-        posright -= cutlength
+    posleft += cutlength
+    posright -= cutlength
     # Get restriction fragments
     return getFragments(chrom, posleft, posright, tabix)
 
@@ -418,8 +427,8 @@ def getPositionsChimeric(repr, supp, ligseq, readlength):
 
     # Obtain aligned positions of the two ends of each alignments
     repr_pos5 = combined_aln[0][1] + 1
-    repr_pos3 = [ x[1] for x in combined_aln if x[0] == breakpoint-2 ][0] + 1
-    supp_pos5 = [ x[1] for x in combined_aln if x[0] == breakpoint-1 ][0] + 1
+    repr_pos3 = next(x[1] for x in combined_aln if x[0] == breakpoint-2) + 1
+    supp_pos5 = next(x[1] for x in combined_aln if x[0] == breakpoint-1) + 1
     supp_pos3 = combined_aln[-1][1] + 1
 
     return repr_pos5, repr_pos3, supp_pos5, supp_pos3
@@ -444,14 +453,10 @@ def getFragmentsChimeric(repr, supp, tabix, ligseq, readlength, cutlength,
 
     # Correct positions by restriction enzyme cutter-length, depending on
     # alignment orientation
-    if repr.is_reverse:
-        repr_posleft += cutlength
-    else:
-        repr_posright -= cutlength
-    if supp.is_reverse:
-        supp_posleft += cutlength
-    else:
-        supp_posright -= cutlength
+    repr_posleft += cutlength
+    repr_posright -= cutlength
+    supp_posleft += cutlength
+    supp_posright -= cutlength
 
     # Get restriction fragments
     frags_repr = getFragments(repr_chrom, repr_posleft, repr_posright, tabix)
@@ -505,10 +510,15 @@ class HiCPair(object):
             TabixFile object for the .bed.gz file containing restriction
             fragment information.
         """
+        self.pair_id = None
         self.reads1 = []
         self.reads2 = []
         self.pos1 = None
         self.pos2 = None
+        self.chrom1 = None
+        self.chrom2 = None
+        self.strand1 = None
+        self.strand2 = None
         self.readlength = None
         self.nearest_site1 = None
         self.nearest_site2 = None
@@ -559,7 +569,6 @@ class HiCPair(object):
 
                 # If reads mapped with high MAPQ to a standard contig
                 if not self.low_MAPQ and not self.other_contig:
-
                     # Compute genomic separations
                     self.computePositions()
 
@@ -596,15 +605,24 @@ class HiCPair(object):
             self.readlength = len(self.reads1[0].query_sequence)
             self.is_empty = False
 
+            # Set self.pair_id if not yet set
+            if self.pair_id is None:
+                self.pair_id = self.reads1[0].query_name
+
     #############################################
     def clearReads(self):
         """
         Delete alignment data from HiCPair object and reset all flags and metadata.
         """
+        self.pair_id = None
         self.reads1 = None
         self.reads2 = None
         self.pos1 = None
         self.pos2 = None
+        self.chrom1 = None
+        self.chrom2 = None
+        self.strand1 = None
+        self.strand2 = None
         self.readlength = None
         self.nearest_site1 = None
         self.nearest_site2 = None
@@ -675,11 +693,15 @@ class HiCPair(object):
         if self.is_empty or self.is_unmapped or self.low_MAPQ or self.other_contig:
             self.pos1 = None
             self.pos2 = None
+            self.strand1 = None
+            self.strand2 = None
             self.separations = None
         # If both reads mapped contiguously
         elif len(self.reads1) == 1 and len(self.reads2) == 1:
             self.pos1, _ = getPositionsContiguous(self.reads1[0])
             self.pos2, _ = getPositionsContiguous(self.reads2[0])
+            self.strand1 = self.reads1[0].is_reverse
+            self.strand2 = self.reads2[0].is_reverse
             self.separations = [ abs(self.pos1 - self.pos2) ]
         # If first read mapped chimerically
         elif len(self.reads1) == 2 and len(self.reads2) == 1:
@@ -687,6 +709,8 @@ class HiCPair(object):
                                                               self.ligseq, self.readlength)
             self.pos1 = repr_pos5
             self.pos2, _ = getPositionsContiguous(self.reads2[0])
+            self.strand1 = self.reads1[0].is_reverse
+            self.strand2 = self.reads2[0].is_reverse
             self.separations = [ abs(self.pos1 - supp_pos5),
                                  abs(self.pos1 - self.pos2),
                                  abs(supp_pos5 - self.pos2) ]
@@ -696,6 +720,8 @@ class HiCPair(object):
             repr_pos5, _, supp_pos5, _ = getPositionsChimeric(self.reads2[0], self.reads2[1],
                                                               self.ligseq, self.readlength)
             self.pos2 = repr_pos5
+            self.strand1 = self.reads1[0].is_reverse
+            self.strand2 = self.reads2[0].is_reverse
             self.separations = [ abs(self.pos1 - self.pos2),
                                  abs(self.pos1 - supp_pos5),
                                  abs(self.pos2 - supp_pos5) ]
@@ -703,6 +729,8 @@ class HiCPair(object):
         else:
             self.pos1 = None
             self.pos2 = None
+            self.strand1 = None
+            self.strand2 = None
             self.separations = None
 
         # Distance between representatives
@@ -770,6 +798,8 @@ class HiCPair(object):
         if self.is_empty or self.is_unmapped:
             self.other_contig = False
         else:
+            self.chrom1 = self.reads1[0].reference_name
+            self.chrom2 = self.reads2[0].reference_name
             self.other_contig = (sum([ r.reference_name not in chrs for r in self.reads1 ]) > 0 or
                                  sum([ r.reference_name not in chrs for r in self.reads2 ]) > 0)
 
@@ -857,6 +887,7 @@ class HiCPair(object):
                                                           self.readlength, self.cutlength)
             # Assign fragments for alignment of second read
             frags_other = getFragmentsContiguous(other, self.fragments, self.cutlength)
+
             # If any of the alignments map to more than one fragment
             if len(frags_repr) > 1 or len(frags_supp) > 1 or len(frags_other) > 1:
                 self.undigested_site = True
@@ -935,7 +966,190 @@ class HiCPair(object):
             self.multiple_fragments = True
             self.undigested_site = False
             self.same_fragment = False
-                
+    
+#############################################
+def bsearch(data, value, return_value=False):
+    """
+    Given a sorted list, return the index containing the list element
+    closest to the given value using binary search.
+    """
+    low = 0
+    high = len(data) - 1
+    while low <= high:
+        mid = int((low + high) / 2)
+        if data[mid] == value:
+            return (mid,data[mid]) if return_value else mid
+        elif data[mid] > value:
+            high = mid - 1
+        else:
+            low = mid + 1
+
+    # Check that value being returned is less than the given value
+    if data[mid] > value:
+        return (mid-1,data[mid-1]) if return_value else mid - 1
+    return (mid,data[mid]) if return_value else mid
+
+#############################################
+class HiCDataset(object):
+    """
+    Class definitions for a HiCDataset class, which stores summary information
+    regarding a set of Hi-C read pairs.
+    """
+    def __init__(self, plot_file, intersect_file, mindist=1e4, maxdist=1e9,
+                 close_mindist=1e2, close_maxdist=1e5, nbins=100,
+                 minsitedist=0, maxsitedist=2000):
+        """
+        A HiCDataset object stores a number of dictionaries that summarize the
+        properties of the dataset:
+        - self.filters : stores, for each filter, the number of read pairs
+            to which the filter applies
+        - self.distances : stores a logarithmic histogram of contact distances
+            over all intrachromosomal contacts
+        - self.orientations : stores a logarithmic histogram of the four
+            paired orientations as a function of contact distance, over all
+            intrachromosomal contacts
+        - self.nearest_sites : stores a nucleotide-resolution histogram of
+            distances to nearest restriction sites, over all aligned reads
+        - self.insert_sizes : stores a nucleotide-resolution histogram of
+            insert sizes, over all pairs for which an insert size was inferred
+        """
+        # Path to PDF file for summary plots
+        self.plot_file = plot_file
+        self.intersect_file = intersect_file
+
+        # Store histogram bins for quick searching
+        self.distbins = np.logspace(math.log10(mindist), math.log10(maxdist), nbins)
+        self.closebins = np.logspace(math.log10(close_mindist), math.log10(close_maxdist), nbins)
+        self.sitebins = range(minsitedist, maxsitedist+1)
+
+        # Initialize summary data; store 
+        self.filters = defaultdict(list)
+        self.distances     = [ 0 for _ in self.distbins ]
+        self.orientations  = [ { 'FF':0, 'FR':0, 'RF':0, 'RR':0 } for _ in self.closebins ]
+        self.nearest_sites = [ 0 for _ in self.sitebins ]
+        self.insert_sizes  = [ 0 for _ in self.sitebins ]
+
+    #############################################
+    def __str__(self):
+        """
+        Return the string representations of the dictionaries.
+        """
+        return '%s\n%s\n%s\n%s\n%s' % (self.filters, self.distances,
+                                       self.orientations, self.nearest_sites, 
+                                       self.insert_sizes)
+
+    #############################################
+    def addPair(self, pair):
+        """
+        Adds a read pair to the Hi-C dataset.
+        """
+        # Run through filters that apply to the pair
+        if pair.is_unmapped:               self.filters['unmapped'].append(pair.pair_id)
+        if pair.low_MAPQ:                  self.filters['low_MAPQ'].append(pair.pair_id)
+        if pair.other_contig:              self.filters['other_contig'].append(pair.pair_id)
+        if pair.multiple_loci:             self.filters['multiple_loci'].append(pair.pair_id)
+        if pair.close_pair:                self.filters['close_pair'].append(pair.pair_id)
+        if pair.undigested_site:           self.filters['undigested_site'].append(pair.pair_id)
+        if pair.multiple_fragments:        self.filters['multiple_fragments'].append(pair.pair_id)
+        if pair.same_fragment:             self.filters['same_fragment'].append(pair.pair_id)
+        if pair.far_from_restriction_site: self.filters['far_from_restriction_site'].append(pair.pair_id)
+        if pair.wrong_insert_size:         self.filters['wrong_insert_size'].append(pair.pair_id)
+
+        # Add distance, orientation, restriction site, and insert size information
+        if not (pair.is_empty or pair.is_unmapped or pair.low_MAPQ or pair.other_contig):
+            # Exclude all cases for which positions are undefined
+            if pair.pos1 is None or pair.pos2 is None:
+                return
+
+            if pair.chrom1 == pair.chrom2:
+                dist = abs(pair.pos1 - pair.pos2)
+                distbin = bsearch(self.distbins, dist)
+                closebin = bsearch(self.closebins, dist)
+                self.distances[distbin] += 1
+                if pair.strand1 is None or pair.strand2 is None:
+                    pass
+                elif pair.strand1 and pair.strand2:
+                    self.orientations[closebin]['RR'] += 1
+                elif pair.strand1:
+                    self.orientations[closebin]['RF'] += 1
+                elif pair.strand2:
+                    self.orientations[closebin]['FR'] += 1
+                else:
+                    self.orientations[closebin]['FF'] += 1 
+
+            neardist1 = abs(pair.pos1 - pair.nearest_site1)
+            neardist2 = abs(pair.pos2 - pair.nearest_site2)
+            try:
+                self.nearest_sites[neardist1 - self.sitebins[0]] += 1
+            except IndexError:
+                self.nearest_sites[self.sitebins[-1]] += 1
+            try:
+                self.nearest_sites[neardist2 - self.sitebins[0]] += 1
+            except IndexError:
+                self.nearest_sites[self.sitebins[-1]] += 1
+            try:
+                self.insert_sizes[pair.insert_size - self.sitebins[0]] += 1
+            except IndexError:
+                self.insert_sizes[self.sitebins[-1]] += 1
+
+    #############################################
+    def plotStatistics(self):
+        """
+        Plot the summary data and save to a PDF file with (relative) path given by
+        self.plotfile.
+        """
+        # Initialize axes
+        fig, axes = plt.subplots(nrows=2, ncols=2)
+
+        # Plot contact distance distribution on log-log axes
+        axes[0,0].loglog(self.distbins, self.distances)
+        axes[0,0].set_xlabel('Contact distance')
+        axes[0,0].set_ylabel('Probability')
+       
+        # Plot orientation distribution as a function of contact distance
+        close_total = [ sum(self.orientations[i].values()) for i in range(len(self.closebins)) ]
+        orientations_FF = [ self.orientations[i]['FF'] / float(close_total[i]) if close_total[i] > 0 else 0
+                            for i in range(len(self.closebins)) ]
+        orientations_FR = [ self.orientations[i]['FR'] / float(close_total[i]) if close_total[i] > 0 else 0
+                            for i in range(len(self.closebins)) ]
+        orientations_RF = [ self.orientations[i]['RF'] / float(close_total[i]) if close_total[i] > 0 else 0
+                            for i in range(len(self.closebins)) ]
+        orientations_RR = [ self.orientations[i]['RR'] / float(close_total[i]) if close_total[i] > 0 else 0
+                            for i in range(len(self.closebins)) ]
+        axes[0,1].semilogx(self.closebins, orientations_FF, label='FF')
+        axes[0,1].semilogx(self.closebins, orientations_FR, label='FR')
+        axes[0,1].semilogx(self.closebins, orientations_RF, label='RF')
+        axes[0,1].semilogx(self.closebins, orientations_RR, label='RR')
+        axes[0,1].set_xlabel('Contact distance')
+        axes[0,1].set_ylabel('Probability')
+
+        # Plot distribution of distances to nearest restriction sites
+        axes[1,0].plot(self.sitebins, self.nearest_sites)
+        axes[1,0].set_xlabel('Distance to nearest restriction site')
+        axes[1,0].set_ylabel('Frequency')
+
+        # Plot distribution of insert sizes
+        axes[1,1].plot(self.sitebins, self.insert_sizes)
+        axes[1,1].set_xlabel('Insert size')
+        axes[1,1].set_ylabel('Frequency')
+
+        # Save figure to given filename
+        plt.savefig(self.plot_file)
+
+    #############################################
+    def plotFilterStatistics(self):
+        """
+        Plot intersections of filters using pyUpSet.
+        """
+        filters_dict = { k : pd.DataFrame(self.filters[k],
+                                          [ 0 for _ in range(len(self.filters[k])) ])
+                         for k in [ 'same_fragment', 'close_pair', 'undigested_site',
+                                    'far_from_restriction_site', 'wrong_insert_size',
+                                    'multiple_loci', 'multiple_fragments' ] }
+        fig = plt.figure()
+        pyu.plot(filters_dict, inters_size_bounds=(10,np.inf))
+        plt.savefig(self.intersect_file)
+
 #############################################
 ####### MAIN SCRIPT FOR DATA ANALYSIS #######
 #############################################
@@ -949,7 +1163,17 @@ def parseBAM(bam, outbam, tabix, enzyme='MboI', mapq_threshold=30,
     curr_reads = []
     finished = False
     count = 0
-    metadata = defaultdict(int)
+    
+    outdir = outbam.split('.bam')[0] + '_figures/'
+    if os.path.exists(outdir):
+        shutil.rmtree(outdir)
+    os.makedirs(outdir)
+
+    dataset = HiCDataset('%s/summary.pdf' % outdir,
+                         '%s/filters.pdf' % outdir, mindist=1e4, maxdist=1e9,
+                         close_mindist=1e2, close_maxdist=1e5, nbins=200,
+                         minsitedist=0, maxsitedist=2000)
+
     fragments_file = pysam.TabixFile(tabix)
     ligseq = getLigationSequence(enzyme)
     cutlength = len(getRestrictionEnzyme(enzyme))
@@ -973,16 +1197,7 @@ def parseBAM(bam, outbam, tabix, enzyme='MboI', mapq_threshold=30,
                                mapq_threshold=mapq_threshold,
                                sep_threshold=sep_threshold,
                                fragments_file=fragments_file)
-                if pair.is_unmapped:               metadata['unmapped'] += 1
-                if pair.low_MAPQ:                  metadata['low_MAPQ'] += 1
-                if pair.other_contig:              metadata['other_contig'] += 1
-                if pair.multiple_loci:             metadata['multiple_loci'] += 1
-                if pair.close_pair:                metadata['close_pair'] += 1
-                if pair.undigested_site:           metadata['undigested_site'] += 1
-                if pair.multiple_fragments:        metadata['multiple_fragments'] += 1
-                if pair.same_fragment:             metadata['same_fragment'] += 1
-                if pair.far_from_restriction_site: metadata['far_from_restriction_site'] += 1
-                if pair.wrong_insert_size:         metadata['wrong_insert_size'] += 1
+                dataset.addPair(pair)
                 pair.writeToFile(outbf)
                 # Update curr_id and re-initialize curr_reads
                 curr_id = read.query_name
@@ -990,15 +1205,22 @@ def parseBAM(bam, outbam, tabix, enzyme='MboI', mapq_threshold=30,
                 count += 1
                 if count % 10000 == 0 and verbose:
                     print('Processed %d read pairs. Flag statistics:' % count)
-                    print(dict(metadata))
+                    for f in dataset.filters:
+                        print('%s : %d' % (f, len(dataset.filters[f])))
 
             # Finally, gather alignment data from current read
             curr_reads.append(read)
 
         outbf.close()
 
-    print('Finished processing %d read pairs. Flag statistics:' % count)
-    print(dict(metadata))
+    # Plot and print summary statistics
+    dataset.plotStatistics()
+    for f in dataset.filters:
+        print('%s : %d' % (f, len(dataset.filters[f])))
+
+    # Plot intersections
+    print('Plotting intersections of filters ...')
+    dataset.plotFilterStatistics()
 
     fragments_file.close()
 
