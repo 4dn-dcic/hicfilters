@@ -15,7 +15,7 @@ pip install biopython
 
 ### Usage
 ```
-python filterHiCReads.py -i <input.bam> -r <restriction_enzyme_sites.bed.gz> -o <output.filtered.bam> [--verbose]
+python filterHiCReads.py -i <input.bam> -f <restriction_enzyme_sites.bed.gz> -o <output.filtered.bam> [--verbose]
 
 # If --verbose flag is specified, the script will output intermediate statistics (every 10000 pairs) to stdout.
 ```
