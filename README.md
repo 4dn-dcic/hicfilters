@@ -43,4 +43,4 @@ SRR1658581.1213 129     chr11   122543034       60      101M    =       73427756
 ```
 
 ### Speed
-Currently about 1 min / 1K reads on Macbook Air 2.2 GHz Intel Core i7 (todo)
+Currently about 1 sec / 1K reads on Macbook Air 2.2 GHz Intel Core i7 (~36M reads per 10hr)
