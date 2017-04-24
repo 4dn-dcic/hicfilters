@@ -5,6 +5,11 @@ Functions for processing BAM files containing aligned Hi-C reads.
 
 This file contains definitions for three classes, Fragment, HiCPair,
 and HiCDataset, as well as a number of helper functions.
+
+Author: Kee-Myoung (Chris) Nam
+        Department of Systems Biology
+        Harvard Medical School
+Last updated: 4/23/2017
 """
 
 from __future__ import print_function
@@ -26,11 +31,57 @@ import matplotlib.pyplot as plt
 import seaborn as sns
 import pandas as pd
 import pyupset as pyu
+from matplotlib_venn import venn2, venn3
 
-#############################################
+chrom_lengths = { 'chr1'  : 249250621,
+                  'chr2'  : 243199373,
+                  'chr3'  : 198022430,
+                  'chr4'  : 191154276,
+                  'chr5'  : 180915260,
+                  'chr6'  : 171115067,
+                  'chr7'  : 159138663,
+                  'chr8'  : 146364022,
+                  'chr9'  : 141213431,
+                  'chr10' : 135534747,
+                  'chr11' : 135006516,
+                  'chr12' : 133851895,
+                  'chr13' : 115169878,
+                  'chr14' : 107349540,
+                  'chr15' : 102531392,
+                  'chr16' : 90354753,
+                  'chr17' : 81195210,
+                  'chr18' : 78077248,
+                  'chr19' : 59128983,
+                  'chr20' : 63025520,
+                  'chr21' : 48129895,
+                  'chr22' : 51304566,
+                  'chrX'  : 155270560,
+                  'chrY'  : 155270560 }
+genome_length = sum(chrom_lengths.values())
+
+##############################################
+class InvalidInputException(Exception):
+    pass
+
+class EmptyPairException(Exception):
+    pass
+
+class BadBreakpointException(Exception):
+    pass
+
+class NoNearestSiteException(Exception):
+    pass
+
+##############################################
 class Fragment(object):
     """
-    Minimal class for restriction fragments.
+    Minimal class for restriction fragments, defining the following
+    binary operations:
+      - Equality   : two fragments are "equal" if they are the same (i.e., same
+                     index, same start position, same end position)
+      - Difference : the "difference" of two fragments is the difference between
+                     their indices (undefined if fragments lie on different
+                     chromosomes)
     """
     def __init__(self, record, delim='\t'):
         data = record.split(delim)
@@ -73,14 +124,17 @@ class Fragment(object):
         return NotImplemented
 
 ##############################################
-def reverseComplement(seq):
+########## VARIOUS HELPER FUNCTIONS ##########
+##########  FOR MANIPULATING READS  ##########
+##############################################
+def reverse_complement(seq):
     """
-    Reverse a string and return as a string.
+    Get reverse complement of a given sequence.
     """
     return str(Seq(seq).reverse_complement())
 
 ##############################################
-def getRestrictionEnzyme(res):
+def get_restriction_enzyme(res):
     """
     Get RestrictionType object for given enzyme name.
     """
@@ -89,30 +143,21 @@ def getRestrictionEnzyme(res):
     return b.get(res)
 
 ##############################################
-def getRestrictionSequence(res):
+def get_ligation_sequence(res):
     """
-    Get the recognition site for the given restriction enzyme.
+    Get the ligation junction sequence expected from a restriction enzyme.
     """
-    enzyme = getRestrictionEnzyme(res)
-    return enzyme.elucidate().replace('N','').replace('^','').replace('_','')
-
-##############################################
-def getLigationSequence(res):
-    """
-    Get the ligation junction sequence expected from a
-    restriction enzyme.
-    """
-    enzyme = getRestrictionEnzyme(res)
+    enzyme = get_restriction_enzyme(res)
     cutseq = enzyme.elucidate()
     seq1 = re.sub('[\^]', '', cutseq.split('_')[0])
     seq2 = re.sub('[_]', '', cutseq.split('^')[1]) 
     return (seq1 + seq2).strip('N')
 
 ##############################################
-def getLigationSites(seq, ligseq, mid=True, offset=0):
+def get_ligation_sites(seq, ligseq, mid=True, offset=0):
     """
-    Given a DNA sequence and a ligation junction, find set of positions of
-    ligation sites.
+    Given a DNA sequence and a ligation junction, find set of 1-based
+    positions of ligation sites.
     """
     half = len(ligseq) / 2   # should be an integer!
     if mid:                  # return 1-based positions of middle of ligation sites
@@ -121,15 +166,15 @@ def getLigationSites(seq, ligseq, mid=True, offset=0):
         return [ x.start() + offset + 1 for x in re.finditer(ligseq, seq) ]
 
 ##############################################
-def reverseCigarString(cigar):
+def reverse_cigar_string(cigar):
     """
-    Given a CIGAR string, reverse it.
+    Return reversed CIGAR string.
     """
     words = re.findall('\d{1,3}[A-Z]', cigar)
     return ''.join(words[::-1])
 
 ##############################################
-def sortReads(reads, mapq_threshold=30):
+def sort_reads(reads, mapq_threshold=30):
     """
     Given a list of pysam.AlignedSegment objects, check that the list
     contains precisely one representative, and if so, return the list
@@ -151,7 +196,7 @@ def sortReads(reads, mapq_threshold=30):
         return [ newreads[reprs[0]] ] + newreads[:reprs[0]] + newreads[reprs[0]+1:]
 
 #############################################
-def switchChimericAlignments(repr, supp):
+def switch_chimeric_alignments(repr, supp):
     """
     Given a representative and a supplementary alignment, switch so that the
     supplementary is now representative. Namely:
@@ -174,10 +219,10 @@ def switchChimericAlignments(repr, supp):
     full_quals = repr.query_qualities
     readlength = len(full_seq)
     if repr.is_reverse:    # Reverse to form presented in FASTQ file
-        full_seq = reverseComplement(full_seq)
+        full_seq = reverse_complement(full_seq)
         full_quals = full_quals[::-1] 
     if supp.is_reverse:    # Reverse again if necessary
-        supp.query_sequence = reverseComplement(full_seq)
+        supp.query_sequence = reverse_complement(full_seq)
         supp.query_qualities = full_quals[::-1]
     else:
         supp.query_sequence = full_seq
@@ -185,7 +230,7 @@ def switchChimericAlignments(repr, supp):
 
     # Mask sequence in representative alignment according to hard clips
     if repr.is_reverse:    # Reverse again, to match representative alignment
-        full_seq = reverseComplement(full_seq)
+        full_seq = reverse_complement(full_seq)
         full_quals = full_quals[::-1]
     clipleft = int(re.findall('^\d{1,3}H', repr.cigarstring)[0][:-1])
     clipright = int(re.findall('\d{1,3}H$', repr.cigarstring)[0][:-1])
@@ -196,7 +241,7 @@ def switchChimericAlignments(repr, supp):
     return supp, repr
 
 #############################################
-def getChimericBreakpoints(repr, supp, site=None):
+def get_chimeric_breakpoints(repr, supp, site=None):
     """
     Given a representative alignment and a supplementary alignment, determine
     the 1-based position at which the split(s) occurred.
@@ -224,6 +269,8 @@ def getChimericBreakpoints(repr, supp, site=None):
     breakpoint : int
         position of breakpoint (either the clipped end of the representative,
         or, if site is not None, the position of the known ligation site)
+    difference : int
+        difference between located breakpoint and the given ligation site
     """
     seq = repr.query_sequence          # query sequence
     cigar_repr = repr.cigarstring      # CIGAR string for representative alignment
@@ -232,17 +279,17 @@ def getChimericBreakpoints(repr, supp, site=None):
                                        # infer read length from representative CIGAR
     breakpoint = 0
 
-    # if one of the alignments are to the reverse strand, get
+    # If one of the alignments are to the reverse strand, get
     # reverse complement of sequence and reverse CIGAR string.
-    # this allows consideration of all alignment positions relative
+    # This allows consideration of all alignment positions relative
     # to a single strand (the forward strand)
     if repr.is_reverse:
-        seq = reverseComplement(seq)
-        cigar_repr = reverseCigarString(cigar_repr)
+        seq = reverse_complement(seq)
+        cigar_repr = reverse_cigar_string(cigar_repr)
     if supp.is_reverse:
-        cigar_supp = reverseCigarString(cigar_supp)
+        cigar_supp = reverse_cigar_string(cigar_supp)
 
-    # determine positions of soft/hard clipping which determine the
+    # Determine positions of soft/hard clipping which determine the
     # chimeric breakpoint.
     # - In "Hi-C" mode, bwa mem returns the portion of the read
     #   that maps the 5' end of the read as representative (soft-clipping
@@ -252,12 +299,12 @@ def getChimericBreakpoints(repr, supp, site=None):
     clip_supp = re.findall('^\d{1,3}H', cigar_supp)[0]
     break_supp = int(clip_supp.split('H')[0]) + 1
 
-    # if site is not given, return the breakpoint corresponding to the
+    # If site is not given, return the breakpoint corresponding to the
     # representative alignment
     if site is None:
         breakpoint = break_repr
         difference = 0
-    # otherwise, iterate over range between break_repr and break_supp, trying
+    # Otherwise, iterate over range between break_repr and break_supp, trying
     # to find ligation site position
     else:
         breaks = sorted([ break_repr, break_supp ])
@@ -274,7 +321,7 @@ def getChimericBreakpoints(repr, supp, site=None):
     return breakpoint, difference
 
 #############################################
-def combineChimericAlignment(repr, supp, readlength, breakpoint):
+def combine_chimeric_alignment(repr, supp, readlength, breakpoint):
     """
     Combine representative and supplementary alignments to give a list
     of tuples that enumerate, from 5' to 3', the sequence of alignment
@@ -298,7 +345,7 @@ def combineChimericAlignment(repr, supp, readlength, breakpoint):
     # add None-entries for clipping events on either end of supplementary
     supp_cigar = supp.cigarstring
     if supp.is_reverse:
-        supp_cigar = reverseCigarString(supp_cigar)
+        supp_cigar = reverse_cigar_string(supp_cigar)
     supp_clip5 = [ int(x.split('H')[0]) for x in re.findall('^\d{1,3}H', supp_cigar) ]
     supp_clip3 = [ int(x.split('H')[0]) for x in re.findall('\d{1,3}H$', supp_cigar) ]
     if len(supp_clip5) > 0:
@@ -316,7 +363,7 @@ def combineChimericAlignment(repr, supp, readlength, breakpoint):
         for i in range(idx, readlength):
             repr_aln[i] = (repr_aln[i][0], pos)
             pos += 1
-    idx, pos = [ x for x in supp_aln if x[1] is not None ][-1]
+    idx, pos = next( x for x in supp_aln[::-1] if x[1] is not None )
     if supp.is_reverse:
         for i in range(idx, -1, -1):
             supp_aln[i] = (supp_aln[i][0], pos)
@@ -336,16 +383,16 @@ def combineChimericAlignment(repr, supp, readlength, breakpoint):
     return [ x for x in combined_aln if x[1] is not None ]
 
 #############################################
-def getFragments(chrom, posleft, posright, tabix):
+def get_fragments(chrom, posleft, posright, tabix):
     """
     Given a chromosome name, the genomic positions of the ends of an
     alignmentm and a pysam.TabixFile of restriction fragments,
     return a list of the fragments that intersect with the alignment.
     """
-    return [ Fragment(x) for x in tabix.fetch(chrom, posleft, posright) ]
+    return set([ Fragment(x) for x in tabix.fetch(chrom, posleft, posright) ])
 
 #############################################
-def getPositionsContiguous(read):
+def get_positions_contiguous(read):
     """
     Get the 5' and 3' end positions of a contiguously aligned read.
     """
@@ -355,24 +402,36 @@ def getPositionsContiguous(read):
         return [read.reference_start + 1, read.reference_end]
 
 #############################################
-def getNearestRestrictionSite(read, fragments):
+def get_nearest_restriction_site(read, fragments):
     """
     Given a pysam.AlignedSegment and a list of Fragment objects, return
     the nearest downstream restriction site to the 5' end of the read.
     """
-    if read.is_reverse:
-        sites = sorted([ f.site1 for f in fragments ], reverse=True)
-        for s in sites:
-            if read.reference_end >= s:
-                return s
+    # Determine position of 5' end of alignment
+    if not read.is_reverse:
+        pos = read.reference_start + 1
     else:
-        sites = sorted([ f.site2 for f in fragments ])
-        for s in sites:
-            if read.reference_start + 1 <= s:
-                return s
+        pos = read.reference_end
+
+    # If the read mapped to reverse strand, identify closest restriction site
+    # to the left of the 5' alignment position
+    if read.is_reverse:
+        sites = [ f.site1 for f in fragments if f.site1 <= pos ]
+        if sites is None or sites == []:
+            raise NoNearestSiteException('No downstream restriction site: pos %d, fragments %s, reverse strand' %\
+                                         (pos, fragments))
+        return max(sites)
+    # If the read mapped to forward strand, identify closest restriction site
+    # to the right of the 5' alignment position
+    else:
+        sites = [ f.site2 for f in fragments if f.site2 >= pos ]
+        if sites is None or sites == []:
+            raise NoNearestSiteException('No downstream restriction site: pos %d, fragments %s, forward strand' %\
+                                         (pos, fragments))
+        return min(sites)
 
 #############################################
-def getFragmentsContiguous(read, tabix, cutlength):
+def get_fragments_contiguous(read, tabix, cutlength, return_positions=True):
     """
     Given a pysam.AlignedSegment and a pysam.TabixFile of restriction fragments,
     return a list of the fragments that intersect with the alignment. 
@@ -385,11 +444,22 @@ def getFragmentsContiguous(read, tabix, cutlength):
     # on alignment orientation
     posleft += cutlength
     posright -= cutlength
-    # Get restriction fragments
-    return getFragments(chrom, posleft, posright, tabix)
+
+    # Get restriction fragments, returning positions if desired
+    pos5 = posright if read.is_reverse else posleft
+    pos3 = posleft if read.is_reverse else posright
+    frags = get_fragments(chrom, posleft, posright, tabix)
+    frag5 = get_fragments(chrom, pos5, pos5+1, tabix)
+    if len(frag5) == 0:
+        print(pos5, pos3, frags)
+    (frag5,) = frag5
+
+    if return_positions:
+        return frags, frag5, pos5, pos3
+    return frags, frag5
 
 #############################################
-def getPositionsChimeric(repr, supp, ligseq, readlength):
+def get_positions_chimeric(repr, supp, ligseq, readlength):
     """
     Given two pysam.AlignedSegment objects, corresponding to the two pieces of
     a chimeric alignment, and a pysam.TabixFile of restriction fragments,
@@ -405,25 +475,25 @@ def getPositionsChimeric(repr, supp, ligseq, readlength):
     # Locate all ligation sites along the representative sequence
     seq = repr.query_sequence
     if repr.is_reverse:
-        seq = reverseComplement(seq)
-    ligsites = getLigationSites(seq, ligseq, mid=True, offset=0)
+        seq = reverse_complement(seq)
+    ligsites = get_ligation_sites(seq, ligseq, mid=True, offset=0)
 
-    # If there are no ligation sites, return original breakpoint uncorrected
+    # If there are no ligation sites, raise Exception
     if len(ligsites) == 0:
-        breakpoint, _ = getChimericBreakpoints(repr, supp, site=None)
+        raise BadBreakpointException('Bad breakpoint found in chimeric read')
     # If there is a single ligation site, correct breakpoint
     elif len(ligsites) == 1:
-        breakpoint, _ = getChimericBreakpoints(repr, supp, site=ligsites[0])
+        breakpoint, _ = get_chimeric_breakpoints(repr, supp, site=ligsites[0])
     # If there are >1 ligation sites, test all of them, and choose the
     # inferred breakpoint that is closest to the reported breakpoints
     # (i.e., has minimum difference)
     else:
-        breakpoints = [ getChimericBreakpoints(repr, supp, site=site) for site in ligsites ]
+        breakpoints = [ get_chimeric_breakpoints(repr, supp, site=site) for site in ligsites ]
         breakpoints.sort(key=lambda x: x[1])
         breakpoint = breakpoints[0][0]
 
     # Combine the two alignments
-    combined_aln = combineChimericAlignment(repr, supp, readlength, breakpoint)
+    combined_aln = combine_chimeric_alignment(repr, supp, readlength, breakpoint)
 
     # Obtain aligned positions of the two ends of each alignments
     repr_pos5 = combined_aln[0][1] + 1
@@ -434,7 +504,7 @@ def getPositionsChimeric(repr, supp, ligseq, readlength):
     return repr_pos5, repr_pos3, supp_pos5, supp_pos3
 
 #############################################
-def getFragmentsChimeric(repr, supp, tabix, ligseq, readlength, cutlength,
+def get_fragments_chimeric(repr, supp, tabix, ligseq, readlength, cutlength,
                          return_positions=False):
     """
     Given a pair of pysam.AlignedSegment objects forming a chimeric alignment,
@@ -442,8 +512,11 @@ def getFragmentsChimeric(repr, supp, tabix, ligseq, readlength, cutlength,
     set of fragments that intersect with the two alignments. 
     """
     # Obtain 5' and 3' positions of both alignments
-    repr_pos5, repr_pos3, supp_pos5, supp_pos3 =\
-        getPositionsChimeric(repr, supp, ligseq, readlength)
+    try:
+        repr_pos5, repr_pos3, supp_pos5, supp_pos3 =\
+            get_positions_chimeric(repr, supp, ligseq, readlength)
+    except BadBreakpointException:
+        raise
 
     # Re-sort the aligned positions and get chromosome names
     repr_posleft, repr_posright = sorted([ repr_pos5, repr_pos3 ])
@@ -459,13 +532,26 @@ def getFragmentsChimeric(repr, supp, tabix, ligseq, readlength, cutlength,
     supp_posright -= cutlength
 
     # Get restriction fragments
-    frags_repr = getFragments(repr_chrom, repr_posleft, repr_posright, tabix)
-    frags_supp = getFragments(supp_chrom, supp_posleft, supp_posright, tabix)
+    repr_pos5_1 = repr_pos5 - cutlength if repr.is_reverse else repr_pos5 + cutlength
+    supp_pos5_1 = supp_pos5 - cutlength if supp.is_reverse else supp_pos5 + cutlength
+    frags_repr = get_fragments(repr_chrom, repr_posleft, repr_posright, tabix)
+    frag5_repr = get_fragments(repr_chrom, repr_pos5_1, repr_pos5_1+1, tabix)
+    frags_supp = get_fragments(supp_chrom, supp_posleft, supp_posright, tabix)
+    frag5_supp = get_fragments(supp_chrom, supp_pos5_1, supp_pos5_1+1, tabix)
+    #print(frags_repr, frag5_repr, frags_supp, frag5_supp)
+
+    try:
+        (frag5_repr,) = frag5_repr
+        (frag5_supp,) = frag5_supp
+    except:
+        print(frags_repr, frag5_repr, frags_supp, frag5_supp)
+        raise
 
     if return_positions:
-        return frags_repr, frags_supp, repr_pos5, repr_pos3, supp_pos5, supp_pos3
+        return frags_repr, frag5_repr, frags_supp, frag5_supp,\
+               repr_pos5, repr_pos3, supp_pos5, supp_pos3
 
-    return frags_repr, frags_supp
+    return frags_repr, frag5_repr, frags_supp, frag5_supp
 
 #############################################
 class HiCPair(object):
@@ -473,8 +559,10 @@ class HiCPair(object):
     Class definitions for a HiCPair object.
     """
     def __init__(self, reads=None, chrs='all', ligseq=None, cutlength=None,
-                 mapq_threshold=30, sep_threshold=1000, res_site_dist_threshold=750,
-                 min_insert_size=0, max_insert_size=1000, fragments_file=None):
+                 mapq_threshold=30, sep_threshold=1000,
+                 res_site_mindist=None, res_site_maxdist=750,
+                 min_insert_size=0, max_insert_size=1000,
+                 dangling_ends_threshold=5, fragments_file=None):
         """
         Constructor for the HiCPair object.
 
@@ -519,34 +607,46 @@ class HiCPair(object):
         self.chrom2 = None
         self.strand1 = None
         self.strand2 = None
+        self.chimeric = None
         self.readlength = None
         self.nearest_site1 = None
         self.nearest_site2 = None
+        self.nearest_site_abs1 = None
+        self.nearest_site_abs2 = None
         self.insert_size = None
         self.ligseq = ligseq
         self.cutlength = cutlength
         self.separations = None
         self.primary_sep = None
+        self.supp_other_frag_sep = None
 
         # Initialize all flags to False, with exception of is_empty
         self.is_empty = True
         self.is_unmapped = False
         self.low_MAPQ = False
         self.other_contig = False
-        self.multiple_loci = False
+        self.three_distal_loci = False
         self.close_pair = False
-        self.multiple_fragments = False
-        self.undigested_site = False
+        self.many_alignments = False
+        self.chimeric_three_fragments = False
+        self.chimeric_supp_other_diff_chroms = False
+        self.chimeric_three_chromosomes = False
+        self.contiguous_undigested_site = False
+        self.chimeric_undigested_site = False
+        self.chimeric_bad_breakpoint = False
+        self.chimeric_wrong_orientation = False
+        self.chimeric_disordered = False
         self.same_fragment = False
-        self.far_from_restriction_site = False
+        self.dangling_ends = False
+        self.far_nearest_restriction_site = False
         self.wrong_insert_size = False
 
         # Open tabix file of restriction fragments, if specified
         self.fragments = None
         if self.ligseq is not None and fragments_file is None:
-            raise Exception('Fragments file should be specified for regular Hi-C data')
+            raise InvalidInputException('Fragments file should be specified for regular Hi-C data')
         elif self.ligseq is None and fragments_file is not None:
-            raise Exception('Fragments file specified without restriction enzyme')
+            raise InvalidInputException('Fragments file specified without restriction enzyme')
         elif fragments_file is not None:
             self.fragments = fragments_file
 
@@ -556,48 +656,99 @@ class HiCPair(object):
 
         # Add alignments if specified
         if reads is not None:
-            self.addReads(reads, mapq_threshold)
+            self.add_reads(reads, mapq_threshold)
 
         # If nonempty, test for mappability
         if not self.is_empty:
-            self.flagUnmappedPair()
+            self.flag_unmapped_pair()
 
             # If nonempty and unmapped, test for low-MAPQ and/or mapping to other contigs
             if not self.is_unmapped:
-                self.flagLowMAPQPair(mapq_threshold=mapq_threshold)
-                self.flagOtherContig(chrs)
+                self.flag_low_MAPQ_pair(mapq_threshold=mapq_threshold)
+                self.flag_other_contig(chrs)
 
                 # If reads mapped with high MAPQ to a standard contig
                 if not self.low_MAPQ and not self.other_contig:
-                    # Compute genomic separations
-                    self.computePositions()
+                    # Determine if either of the reads aligned chimerically
+                    if len(self.reads1) == 1 and len(self.reads2) == 1:
+                        self.chimeric = 0
+                    elif len(self.reads1) == 2 and len(self.reads2) == 1:
+                        self.chimeric = 1
+                    elif len(self.reads1) == 1 and len(self.reads2) == 2:
+                        self.chimeric = 2
+                    else:
+                        self.many_alignments = True
+                        try:
+                            self.update_BAM_tags()
+                        except EmptyPairException:
+                            raise
+                        return
 
-                    # Flag pair if there are > 3 alignments, or there are 3 alignments
-                    # and the minimum distance b/t each pair exceeds sep_threshold
-                    self.flagMultipleLoci(sep_threshold=sep_threshold)
+                    # Assign restriction fragments to alignments
+                    if self.ligseq is not None:
+                        try:
+                            self.assign_fragments(res_site_maxdist=res_site_maxdist,
+                                                  min_insert_size=min_insert_size,
+                                                  max_insert_size=max_insert_size,
+                                                  dangling_ends_threshold=dangling_ends_threshold)
+                        except BadBreakpointException:
+                            self.chimeric_bad_breakpoint = True
+                            try:
+                                self.update_BAM_tags()
+                            except EmptyPairException:
+                                raise
+                            return
+                    # If enzyme was not specified, compute positions and separation
+                    elif self.chimeric == 0:
+                        self.pos1, _ = get_positions_contiguous(self.reads1[0])
+                        self.pos2, _ = get_positions_contiguous(self.reads2[0])
+                        self.separations = [ abs(self.pos1 - self.pos2) ]
+                    elif self.chimeric == 1:
+                        self.pos1, _, supp_pos5, _ = get_positions_chimeric(self.reads1[0], self.reads1[1])
+                        self.pos2, _ = get_positions_contiguous(self.reads2[0])
+                        self.separations = [ abs(self.pos1 - self.pos2),
+                                             abs(self.pos1 - supp_pos5),
+                                             abs(self.pos2 - supp_pos5) ]
+                    else:
+                        self.pos2, _, supp_pos5, _ = get_positions_chimeric(self.reads2[0], self.reads2[1])
+                        self.pos1, _ = get_positions_contiguous(self.reads1[0])
+                        self.separations = [ abs(self.pos1 - self.pos2),
+                                             abs(self.pos1 - supp_pos5),
+                                             abs(self.pos2 - supp_pos5) ]
+
+                    # Obtain alignment orientations, depending on read positions
+                    if self.pos1 < self.pos2:
+                        self.strand1 = self.reads1[0].is_reverse
+                        self.strand2 = self.reads2[0].is_reverse
+                    else:
+                        self.strand1 = self.reads2[0].is_reverse
+                        self.strand2 = self.reads1[0].is_reverse
+
+                    self.primary_sep = abs(self.pos1 - self.pos2)
+
+                    # Flag pair if there are 3 alignments and the minimum distance b/t
+                    # each pair exceeds sep_threshold
+                    if self.chimeric > 0:
+                        self.flag_three_distal_loci(sep_threshold=sep_threshold)
 
                     # Flag pair if separation is less than empirical threshold
                     # (<10kb for 6-cutter, <1kb for 4-cutter, respectively)
-                    self.flagClosePair()
-
-                    # Flag pair if reads map to multiple restriction fragments
-                    if self.ligseq is not None:
-                        self.assignFragments()
-
+                    self.flag_close_pair()
+                   
         # Update BAM tags
         try:
-            self.updateBAMTags()
-        except:
+            self.update_BAM_tags()
+        except EmptyPairException:
             pass
 
     #############################################
-    def addReads(self, reads, mapq_threshold):
+    def add_reads(self, reads, mapq_threshold):
         """
         Add alignment data (lists of pysam.AlignedSegment objects).
         """
-        reads1 = sortReads([ r for r in reads if r.is_read1 ],
+        reads1 = sort_reads([ r for r in reads if r.is_read1 ],
                            mapq_threshold=mapq_threshold)
-        reads2 = sortReads([ r for r in reads if r.is_read2 ],
+        reads2 = sort_reads([ r for r in reads if r.is_read2 ],
                            mapq_threshold=mapq_threshold)
         if reads1 is not None and reads2 is not None:
             self.reads1 = reads1
@@ -610,7 +761,7 @@ class HiCPair(object):
                 self.pair_id = self.reads1[0].query_name
 
     #############################################
-    def clearReads(self):
+    def clear_reads(self):
         """
         Delete alignment data from HiCPair object and reset all flags and metadata.
         """
@@ -623,61 +774,85 @@ class HiCPair(object):
         self.chrom2 = None
         self.strand1 = None
         self.strand2 = None
+        self.chimeric = None
         self.readlength = None
         self.nearest_site1 = None
         self.nearest_site2 = None
+        self.nearest_site_abs1 = None
+        self.nearest_site_abs2 = None
         self.insert_size = None
         self.separations = None
         self.primary_sep = None
+        self.supp_other_frag_sep = None
         self.is_empty = True
         self.is_unmapped = False
         self.other_contig = False
-        self.multiple_loci = False
+        self.three_distal_loci = False
         self.close_pair = False
-        self.multiple_fragments = False
-        self.undigested_site = False
+        self.many_alignments = False
+        self.chimeric_three_fragments = False
+        self.chimeric_supp_other_diff_chroms = False
+        self.chimeric_three_chromosomes = False
+        self.contiguous_undigested_site = False
+        self.chimeric_undigested_site = False
+        self.chimeric_bad_breakpoint = False
+        self.chimeric_wrong_orientation = False
+        self.chimeric_disordered = False
         self.same_fragment = False
-        self.far_from_restriction_site = False
+        self.dangling_ends = False
+        self.far_nearest_restriction_site = False
         self.wrong_insert_size = False
 
     #############################################
-    def updateBAMTags(self):
+    def update_BAM_tags(self):
         """
         Update tags for each alignment record in self.reads1 and self.reads2.
 
         COMPLETE LIST OF TAGS
         ---------------------
-        BOOLEAN TAGS : YM - whether either read was unmapped or poorly mapped
-                       YL - whether the reads mapped to multiple distal loci
-                       YC - whether the reads represent a very close-range contact
-                       YF - whether the reads mapped to multiple restriction fragments
+        BOOLEAN TAGS : YM - whether either read was unmapped, mapped with MAPQ less than a
+                            given threshold, or mapped to a non-standard contig
+                       YL - whether the reads mapped to three or more distal loci
+                       YC - whether the reads represent a close-range contact (< 1kb)
+                       YF - whether the reads mapped to three restriction fragments
+                       YG - whether the reads mapped to four or more restriction fragments
                        YU - whether the reads contain an undigested restriction site
                        YS - whether the reads mapped to the same restriction fragment
+                       YD - whether the reads contain a restriction site close to
+                            (within 111 bp of) the 5' end of any read
                        YI - whether the reads come from an insert with anomalous length
-                       YR - whether either read mapped very far from the nearest restriction site
+                       YR - whether either read mapped far (> 750 bp) from the nearest restriction site
         INTEGER TAGS : Z1 - position of read 1
                        Z2 - position of read 2
                        ZM - position of nearest restriction site downstream of read 1
                        ZN - position of nearest restriction site downstream of read 2
         """
         if self.is_empty:
-            raise Exception('Cannot write empty HiCPair to file')
+            raise EmptyPairException('Cannot write empty HiCPair to file')
         for r in self.reads1 + self.reads2:
             r.set_tag('YM', int(self.is_unmapped or self.low_MAPQ or self.other_contig), value_type='i')
-            r.set_tag('YL', int(self.multiple_loci), value_type='i')
+            r.set_tag('YL', int(self.three_distal_loci), value_type='i')
             r.set_tag('YC', int(self.close_pair), value_type='i')
-            r.set_tag('YF', int(self.multiple_fragments), value_type='i')
-            r.set_tag('YU', int(self.undigested_site), value_type='i')
+            r.set_tag('YA', int(self.many_alignments), value_type='i')
+            r.set_tag('YZ', int(self.chimeric_disordered), value_type='i')
+            r.set_tag('YF', int(self.chimeric_three_fragments), value_type='i')
+            r.set_tag('YH', int(self.chimeric_supp_other_diff_chroms), value_type='i')
+            r.set_tag('YT', int(self.chimeric_three_chromosomes), value_type='i')
+            r.set_tag('YB', int(self.chimeric_bad_breakpoint), value_type='i')
+            r.set_tag('YU', int(self.contiguous_undigested_site or
+                                self.chimeric_undigested_site), value_type='i')
+            r.set_tag('YO', int(self.chimeric_wrong_orientation), value_type='i')
             r.set_tag('YS', int(self.same_fragment), value_type='i')
+            r.set_tag('YD', int(self.dangling_ends), value_type='i')
             r.set_tag('YI', int(self.wrong_insert_size), value_type='i')
-            r.set_tag('YR', int(self.far_from_restriction_site), value_type='i')
+            r.set_tag('YR', int(self.far_nearest_restriction_site), value_type='i')
             r.set_tag('Z1', self.pos1, value_type='i')
             r.set_tag('Z2', self.pos2, value_type='i')
             r.set_tag('ZM', self.nearest_site1, value_type='i')
             r.set_tag('ZN', self.nearest_site2, value_type='i')
 
     #############################################
-    def writeToFile(self, outbam):
+    def write_to_file(self, outbam):
         """
         Write alignment records to a BAM file (pysam.AlignmentFile).
         """
@@ -685,62 +860,7 @@ class HiCPair(object):
             outbam.write(r)
 
     #############################################
-    def computePositions(self):
-        """
-        Determine 5' positions of the alignments.
-        """
-        # If either read is empty, unmapped, low-MAPQ, or mapped to non-standard contig
-        if self.is_empty or self.is_unmapped or self.low_MAPQ or self.other_contig:
-            self.pos1 = None
-            self.pos2 = None
-            self.strand1 = None
-            self.strand2 = None
-            self.separations = None
-        # If both reads mapped contiguously
-        elif len(self.reads1) == 1 and len(self.reads2) == 1:
-            self.pos1, _ = getPositionsContiguous(self.reads1[0])
-            self.pos2, _ = getPositionsContiguous(self.reads2[0])
-            self.strand1 = self.reads1[0].is_reverse
-            self.strand2 = self.reads2[0].is_reverse
-            self.separations = [ abs(self.pos1 - self.pos2) ]
-        # If first read mapped chimerically
-        elif len(self.reads1) == 2 and len(self.reads2) == 1:
-            repr_pos5, _, supp_pos5, _ = getPositionsChimeric(self.reads1[0], self.reads1[1],
-                                                              self.ligseq, self.readlength)
-            self.pos1 = repr_pos5
-            self.pos2, _ = getPositionsContiguous(self.reads2[0])
-            self.strand1 = self.reads1[0].is_reverse
-            self.strand2 = self.reads2[0].is_reverse
-            self.separations = [ abs(self.pos1 - supp_pos5),
-                                 abs(self.pos1 - self.pos2),
-                                 abs(supp_pos5 - self.pos2) ]
-        # If second read mapped chimerically
-        elif len(self.reads1) == 1 and len(self.reads2) == 2:
-            self.pos1, _ = getPositionsContiguous(self.reads1[0])
-            repr_pos5, _, supp_pos5, _ = getPositionsChimeric(self.reads2[0], self.reads2[1],
-                                                              self.ligseq, self.readlength)
-            self.pos2 = repr_pos5
-            self.strand1 = self.reads1[0].is_reverse
-            self.strand2 = self.reads2[0].is_reverse
-            self.separations = [ abs(self.pos1 - self.pos2),
-                                 abs(self.pos1 - supp_pos5),
-                                 abs(self.pos2 - supp_pos5) ]
-        # If the read pair was otherwise (anomalously) aligned
-        else:
-            self.pos1 = None
-            self.pos2 = None
-            self.strand1 = None
-            self.strand2 = None
-            self.separations = None
-
-        # Distance between representatives
-        if self.pos1 is not None and self.pos2 is not None:
-            self.primary_sep = abs(self.pos1 - self.pos2)
-        else:
-            self.primary_sep = None
-
-    #############################################
-    def flagUnmappedPair(self):
+    def flag_unmapped_pair(self):
         """
         Sets self.is_unmapped to True if either read is unmapped. Only checks
         representatives.
@@ -753,18 +873,18 @@ class HiCPair(object):
             # If the representative is unmapped while there is a supplementary,
             # replace representative with next supplementary
             if unmapped1 and len(self.reads1) > 1:
-                repr, supp = switchChimericAlignments(self.reads1[0], self.reads1[1])
+                repr, supp = switch_chimeric_alignments(self.reads1[0], self.reads1[1])
                 self.reads1 = [repr, supp] + self.reads1[2:]
                 unmapped1 = False
             # Do the same for the second read
             if unmapped2 and len(self.reads2) > 1:
-                repr, supp = switchChimericAlignments(self.reads2[0], self.reads2[1])
+                repr, supp = switch_chimeric_alignments(self.reads2[0], self.reads2[1])
                 self.reads2 = [repr, supp] + self.reads2[2:]
                 unmapped2 = False
             self.is_unmapped = (unmapped1 or unmapped2)
 
     #############################################
-    def flagLowMAPQPair(self, mapq_threshold=30):
+    def flag_low_MAPQ_pair(self, mapq_threshold=30):
         """
         Sets self.low_MAPQ to True if both reads have been mapped, but either
         read has MAPQ at or less than <mapq_threshold>. Only checks representatives.
@@ -779,18 +899,18 @@ class HiCPair(object):
             # If either representative has low MAPQ, replace with
             # supplementary
             if low_mapq1 and len(self.reads1) > 1:
-                repr, supp = switchChimericAlignments(self.reads1[0], self.reads1[1])
+                repr, supp = switch_chimeric_alignments(self.reads1[0], self.reads1[1])
                 self.reads1 = [repr, supp] + self.reads1[2:]
                 low_mapq1 = False
             # Do the same for second read
             if low_mapq2 and len(self.reads2) > 1:
-                repr, supp = switchChimericAlignments(self.reads2[0], self.reads2[1])
+                repr, supp = switch_chimeric_alignments(self.reads2[0], self.reads2[1])
                 self.reads2 = [repr, supp] + self.reads2[2:]
                 low_mapq2 = False
             self.low_MAPQ = (low_mapq1 or low_mapq2)
 
     #############################################
-    def flagOtherContig(self, chrs):
+    def flag_other_contig(self, chrs):
         """
         Sets self.other_contig to True if any one of the alignments mapped
         to a contig not in <chrs>.
@@ -804,41 +924,34 @@ class HiCPair(object):
                                  sum([ r.reference_name not in chrs for r in self.reads2 ]) > 0)
 
     #############################################
-    def flagMultipleLoci(self, sep_threshold=1000):
+    def flag_three_distal_loci(self, sep_threshold=1000):
         """
-        Sets self.multiple_loci to True if there are > 3 alignments for the
-        pair, or there are 3 alignments and the minimum distance b/t each
-        pair of alignments exceeds <sep_threshold>.
+        Sets self.three_distal_loci to True if the pair has three alignments and
+        the minimum distance b/t each pair of alignments exceeds <sep_threshold>.
         """
         # Default to False if read pair is empty or unmapped
         if self.is_empty or self.is_unmapped or self.low_MAPQ or self.other_contig:
-            self.multiple_loci = False
-        # If there are two alignments, set to False
-        elif len(self.reads1) == 1 and len(self.reads2) == 1:
-            self.multiple_loci = False
+            self.three_distal_loci = False
+        # If there are 2 or >3 alignments, set to False
+        elif self.chimeric is None or self.chimeric == 0:
+            self.three_distal_loci = False
         # If there are three alignments, look for minimum separation
         # between each pair of alignments 
-        elif (len(self.reads1) == 2 and len(self.reads2) == 1) or\
-             (len(self.reads1) == 1 and len(self.reads2) == 2):
-            if self.separations is None:
-                self.computePositions()
-            min_dist = min(self.separations)
-            self.multiple_loci = (min_dist > sep_threshold)
-        # If there are > 3 alignments, set to True
         else:
-            self.multiple_loci = True
+            min_dist = min(self.separations)
+            self.three_distal_loci = (min_dist > sep_threshold)
 
     #############################################
-    def flagClosePair(self):
+    def flag_close_pair(self):
         """
         Sets self.close_pair to True if abs(self.pos1 - self.pos2) is less than
         or equal to a threshold based on the cutter length.
         """
+        thresholds = { 4 : 1000, 6 : 10000 }
+
         if self.is_empty or self.is_unmapped or self.low_MAPQ or self.other_contig:
             self.close_pair = False
-        
-        thresholds = { 4 : 1000, 6 : 10000 }
-        if self.cutlength is None:
+        elif self.cutlength is None:
             self.close_pair = False
         elif self.pos1 is None or self.pos2 is None:
             self.close_pair = False
@@ -846,8 +959,9 @@ class HiCPair(object):
             self.close_pair = (self.primary_sep <= thresholds[self.cutlength])
 
     #############################################
-    def assignFragments(self, res_site_dist_threshold=750, min_insert_size=0,
-                        max_insert_size=1000):
+    def assign_fragments(self, res_site_maxdist=750,
+                         min_insert_size=0, max_insert_size=1000,
+                         dangling_ends_threshold=5):
         """
         Determines all restriction fragments that intersect with each
         alignment. Sets all fragment-related flags as necessary.
@@ -855,129 +969,250 @@ class HiCPair(object):
         ###################
         # BOTH CONTIGUOUS #
         ###################
-        def assignFragmentsBothContiguous():
+        def assign_fragments_both_contiguous():
             """
             Assign fragments in the case where both reads mapped contiguously.
             """
-            self.multiple_fragments = False
-            frags1 = getFragmentsContiguous(self.reads1[0], self.fragments, self.cutlength)
-            frags2 = getFragmentsContiguous(self.reads2[0], self.fragments, self.cutlength)
+            # Initialize flags
+            self.contiguous_undigested_site = False
+            self.same_fragment = False
+            self.chimeric_undigested_site = False
+            self.chimeric_three_fragments = False
+            self.chimeric_three_chromosomes = False
+            self.chimeric_wrong_orientation = False
+            self.chimeric_disordered = False
+
+            # Assign fragments to both alignments
+            frags1, _, self.pos1, _ = get_fragments_contiguous(self.reads1[0], self.fragments,
+                                                                    self.cutlength, return_positions=True)
+            frags2, _, self.pos2, _ = get_fragments_contiguous(self.reads2[0], self.fragments,
+                                                                    self.cutlength, return_positions=True)
             # If either read intersects with > 1 fragments, flag for undigested site
             if len(frags1) > 1 or len(frags2) > 1:
-                self.undigested_site = True
-                self.same_fragment = False
-            # If both reads intersect with the same fragment, flag for same-fragment pair
-            elif frags1[0] == frags2[0]:
-                self.undigested_site = False
+                self.contiguous_undigested_site = True
+            # If the two reads map to the same fragment (at least partially), flag for same-fragment 
+            if len(frags1.intersection(frags2)) > 0:
                 self.same_fragment = True
-            # If both reads intersect with unique distinct fragments
-            else:
-                self.undigested_site = False
-                self.same_fragment = False
             return frags1, frags2
 
         ################
         # ONE CHIMERIC #
         ################
-        def assignFragmentsOneChimeric(repr, supp, other):
+        def assign_fragments_one_chimeric(repr, supp, other):
             """
             Assign fragments in the case where one read mapped chimerically.
             """
-            frags_repr, frags_supp = getFragmentsChimeric(repr, supp, self.fragments, self.ligseq,
-                                                          self.readlength, self.cutlength)
-            # Assign fragments for alignment of second read
-            frags_other = getFragmentsContiguous(other, self.fragments, self.cutlength)
+            # Initialize flags. NOTE: The three alignments cannot map to the same fragment
+            # because (at this stage) the representative and supplementary must map to 
+            # distinct fragments
+            self.contiguous_undigested_site = False
+            self.same_fragment = False
+            self.chimeric_undigested_site = False
+            self.chimeric_three_fragments = False
+            self.chimeric_supp_other_diff_chroms = False
+            self.chimeric_three_chromosomes = False
+            self.chimeric_wrong_orientation = False
+            self.chimeric_disordered = False
 
-            # If any of the alignments map to more than one fragment
-            if len(frags_repr) > 1 or len(frags_supp) > 1 or len(frags_other) > 1:
-                self.undigested_site = True
-                self.multiple_fragments = True
-                self.same_fragment = False
-            # If all of the alignments map to single fragments, and the supplementary
-            # and contiguous alignments map to the same fragment
-            elif frags_supp[0] == frags_other[0]:
-                self.undigested_site = False
-                self.multiple_fragments = False
-                # If, in addition, the representative also maps to the same fragment
-                if frags_repr[0] == frags_other[0]:
-                    self.same_fragment = True
-                else:
-                    self.same_fragment = False
-            # Otherwise, the alignments all map uniquely to distinct fragments
+            # Assign fragments to all three alignments
+            try:
+                frags_repr, _, frags_supp, frag5_supp, pos_repr, _, pos_supp, _ =\
+                        get_fragments_chimeric(repr, supp, self.fragments, self.ligseq,
+                                               self.readlength, self.cutlength, return_positions=True)
+            except BadBreakpointException:
+                raise
+
+            frags_other, frag5_other, pos_other, _ =\
+                    get_fragments_contiguous(other, self.fragments,
+                                             self.cutlength, return_positions=True)
+            self.supp_other_frag_sep = frag5_supp - frag5_other
+            # If supplementary and contiguous alignments map to same fragment
+            if len(frags_supp.intersection(frags_other)) > 0:
+                # Require that supplementary and contiguous are inner-oriented
+                # Otherwise, flag as having wrong orientation
+                if not ((pos_supp < pos_other and not supp.is_reverse and other.is_reverse) or\
+                        (pos_other < pos_supp and not other.is_reverse and supp.is_reverse)):
+                    self.chimeric_wrong_orientation = True
             else:
-                self.undigested_site = False
-                self.multiple_fragments = True
-                self.same_fragment = False
-            return frags_repr, frags_other
+                # Now test if representative and contiguous alignments map to same fragment
+                if len(frags_repr.intersection(frags_other)) > 0:
+                    self.chimeric_disordered = True
+                # Otherwise, all alignments fall into distinct fragments. NOTE: The representative
+                # and supplementary cannot fall into the same fragment, because they must be
+                # (at this stage) separated by a ligation site
+                else:
+                    self.chimeric_three_fragments = True
+                    # Check whether the supplementary and contiguous are on separate chromosomes
+                    if supp.reference_name != other.reference_name:
+                        self.chimeric_supp_other_diff_chroms = True
+                        if (repr.reference_name != other.reference_name and
+                                repr.reference_name != supp.reference_name):
+                            self.chimeric_three_chromosomes = True
+                    # Require that supplementary and contiguous are inner-oriented
+                    # Otherwise, flag as having wrong orientation
+                    if not ((pos_supp < pos_other and not supp.is_reverse and other.is_reverse) or
+                            (pos_other < pos_supp and not other.is_reverse and supp.is_reverse)):
+                        self.chimeric_wrong_orientation = True
+            # Finally, if any of the alignments map to more than one fragment, mark
+            # as having an undigested site
+            if len(frags_repr) > 1 or len(frags_supp) > 1 or len(frags_other) > 1:
+                self.chimeric_undigested_site = True
+
+            return frags_repr, frags_supp, frags_other, pos_repr, pos_supp, pos_other
 
         #####################################
         # RESTRICTION SITES AND INSERT SIZE #
         #####################################
-        def computeNearestSitesAndInsertSize(read1, read2, frags1, frags2):
+        def compute_nearest_sites_insert_size(read1, read2, frags1, frags2):
             """
             Given alignments for the first and second reads, and their assigned
             fragments, locate the nearest restriction site to each read, and compute
             the expected insert size.
             """
-            self.nearest_site1 = getNearestRestrictionSite(read1, frags1)
-            self.nearest_site2 = getNearestRestrictionSite(read2, frags2)
+            # Nearest restriction site to a given read alignment is the furthest
+            # restriction site downstream of the 5' end that serves as an endpoint
+            # to a fragment intersecting the alignment
+            try:
+                self.nearest_site1 = get_nearest_restriction_site(read1, frags1)
+            except NoNearestSiteException:
+                raise
+            try:
+                self.nearest_site2 = get_nearest_restriction_site(read2, frags2)
+            except NoNearestSiteException:
+                raise
             neardist1 = abs(self.nearest_site1 - self.pos1)
             neardist2 = abs(self.nearest_site2 - self.pos2)
-            if neardist1 > res_site_dist_threshold or neardist2 > res_site_dist_threshold:
-                self.far_from_restriction_site = True
+            if neardist1 > res_site_maxdist or neardist2 > res_site_maxdist:
+                self.far_nearest_restriction_site = True
             else:
-                self.far_from_restriction_site = False
+                self.far_nearest_restriction_site = False
+
             # Compute insert size
-            self.insert_size = neardist1 + neardist2
+            if read1.reference_name != read2.reference_name:
+                self.insert_size = neardist1 + neardist2
+            else:
+                d = abs(self.pos1 - self.pos2)
+                self.insert_size = min([neardist1 + neardist2, d])
             if self.insert_size < min_insert_size or self.insert_size > max_insert_size:
                 self.wrong_insert_size = True
             else:
                 self.wrong_insert_size = False
 
+        #################
+        # DANGLING ENDS #
+        #################
+        def is_dangling_ends(frags1, frags2):
+            """
+            Determines if the 5' end of a read is very close (< 5 bp by default)
+            to a restriction site. Should only be done for contiguously aligned reads
+            or representatives in a chimeric alignment.
+            """
+            # Initialize distance to nearest site to be arbitrarily large
+            self.nearest_site_abs1 = self.nearest_site_abs2 = 1e9
+            self.dangling_ends = False
+            for f in frags1:
+                s = min(abs(f.site1 - self.pos1), abs(f.site2 - self.pos1))
+                if s < self.nearest_site_abs1:
+                    self.nearest_site_abs1 = s
+            for f in frags2:
+                s = min(abs(f.site1 - self.pos2), abs(f.site2 - self.pos2))
+                if s < self.nearest_site_abs2:
+                    self.nearest_site_abs2 = s
+            if (self.nearest_site_abs1 < dangling_ends_threshold
+                    or self.nearest_site_abs2 < dangling_ends_threshold):
+                self.dangling_ends = True
+
         #####################################
         # If pair is empty, unmapped, low-MAPQ, or maps to non-standard contig,
         # don't bother with fragment assignment
         if self.is_empty or self.is_unmapped or self.low_MAPQ or self.other_contig:
-            self.multiple_fragments = False
-            self.undigested_site = False
+            self.chimeric_three_fragments = False
+            self.chimeric_supp_other_diff_chroms = False
+            self.chimeric_three_chromosomes = False
+            self.chimeric_undigested_site = False
+            self.chimeric_wrong_orientation = False
+            self.chimeric_disordered = False
+            self.contiguous_undigested_site = False
             self.same_fragment = False
-            self.far_from_restriction_site = False
+            self.dangling_ends = False
+            self.far_nearest_restriction_site = False
             self.wrong_insert_size = False
+            self.supp_other_frag_sep = None
 
         # If both reads mapped contiguously, then reads cannot intersect with
         # more than 2 distal fragments, save for the possibility of undigested
         # restriction sites
-        elif len(self.reads1) == 1 and len(self.reads2) == 1:
-            frags1, frags2 = assignFragmentsBothContiguous()
-            computeNearestSitesAndInsertSize(self.reads1[0], self.reads2[0], frags1, frags2)
+        elif self.chimeric == 0:
+            frags1, frags2 = assign_fragments_both_contiguous()
+            self.supp_other_frag_sep = None
+            self.separations = [ abs(self.pos1 - self.pos2) ]
+            compute_nearest_sites_insert_size(self.reads1[0], self.reads2[0], frags1, frags2)
+            is_dangling_ends(frags1, frags2)
 
         # If the first read was chimerically aligned
-        elif len(self.reads1) == 2 and len(self.reads2) == 1:
-            frags1, frags2 = assignFragmentsOneChimeric(self.reads1[0], self.reads1[1], self.reads2[0])
-            computeNearestSitesAndInsertSize(self.reads1[0], self.reads2[0], frags1, frags2)
+        elif self.chimeric == 1:
+            try:
+                frags_repr, frags_supp, frags_other, self.pos1, supp_pos5, self.pos2 =\
+                    assign_fragments_one_chimeric(self.reads1[0], self.reads1[1], self.reads2[0])
+            except BadBreakpointException:
+                raise
+            self.separations = [ abs(self.pos1 - self.pos2),
+                                 abs(self.pos1 - supp_pos5),
+                                 abs(self.pos2 - supp_pos5) ]
+            # Here, one must be careful with computing nearest restriction sites: the
+            # contiguous alignment's 5' end should be compared with the fragments intersecting
+            # the supplementary alignment
+            if not (self.chimeric_supp_other_diff_chroms or self.chimeric_disordered or
+                    self.chimeric_wrong_orientation):
+                compute_nearest_sites_insert_size(self.reads1[0], self.reads2[0], frags_repr, frags_supp)
+            is_dangling_ends(frags_repr, frags_other)
 
         # If the second read was chimerically aligned
-        elif len(self.reads1) == 1 and len(self.reads2) == 2:
-            frags2, frags1 = assignFragmentsOneChimeric(self.reads2[0], self.reads2[1], self.reads1[0])
-            computeNearestSitesAndInsertSize(self.reads1[0], self.reads2[0], frags1, frags2)
+        elif self.chimeric == 2:
+            try:
+                frags_repr, frags_supp, frags_other, self.pos2, supp_pos5, self.pos1 =\
+                    assign_fragments_one_chimeric(self.reads2[0], self.reads2[1], self.reads1[0])
+            except BadBreakpointException:
+                raise
+            self.separations = [ abs(self.pos1 - self.pos2),
+                                 abs(self.pos1 - supp_pos5),
+                                 abs(self.pos2 - supp_pos5) ]
+            if not (self.chimeric_supp_other_diff_chroms or self.chimeric_disordered or
+                    self.chimeric_wrong_orientation):
+                compute_nearest_sites_insert_size(self.reads1[0], self.reads2[0], frags_supp, frags_repr)
+            is_dangling_ends(frags_other, frags_repr)
 
         # Otherwise, one or both reads map to multiple loci
         else:
-            self.multiple_fragments = True
-            self.undigested_site = False
+            self.many_alignments = True
+            self.chimeric_three_fragments = False
+            self.chimeric_supp_other_diff_chroms = False
+            self.chimeric_three_chromosomes = False
+            self.chimeric_wrong_orientation = False
+            self.contiguous_undigested_site = False
+            self.chimeric_undigested_site = False
+            self.chimeric_disordered = False
             self.same_fragment = False
+            self.dangling_ends = False
+            self.far_nearest_restriction_site = False
+            self.wrong_insert_size = False
     
 #############################################
 def bsearch(data, value, return_value=False):
     """
-    Given a sorted list, return the index containing the list element
-    closest to the given value using binary search.
+    Given a sorted list, return the index of the greatest element
+    that is less than the given value, via binary search.
     """
     low = 0
     high = len(data) - 1
+    if data[low] > value or data[high] <= value:
+        return None
+
     while low <= high:
         mid = int((low + high) / 2)
-        if data[mid] == value:
+        if mid == len(data) - 1:
+            return None
+        elif data[mid] <= value < data[mid+1]:
             return (mid,data[mid]) if return_value else mid
         elif data[mid] > value:
             high = mid - 1
@@ -985,8 +1220,6 @@ def bsearch(data, value, return_value=False):
             low = mid + 1
 
     # Check that value being returned is less than the given value
-    if data[mid] > value:
-        return (mid-1,data[mid-1]) if return_value else mid - 1
     return (mid,data[mid]) if return_value else mid
 
 #############################################
@@ -995,188 +1228,865 @@ class HiCDataset(object):
     Class definitions for a HiCDataset class, which stores summary information
     regarding a set of Hi-C read pairs.
     """
-    def __init__(self, plot_file, intersect_file, mindist=1e4, maxdist=1e9,
-                 close_mindist=1e2, close_maxdist=1e5, nbins=100,
+    def __init__(self, outdir, resolution=1000, mindist=2e4, maxdist=1e9,
+                 close_mindist=10, close_maxdist=1e5, binratio=1.01,
                  minsitedist=0, maxsitedist=2000):
         """
         A HiCDataset object stores a number of dictionaries that summarize the
-        properties of the dataset:
-        - self.filters : stores, for each filter, the number of read pairs
-            to which the filter applies
-        - self.distances : stores a logarithmic histogram of contact distances
-            over all intrachromosomal contacts
-        - self.orientations : stores a logarithmic histogram of the four
-            paired orientations as a function of contact distance, over all
-            intrachromosomal contacts
-        - self.nearest_sites : stores a nucleotide-resolution histogram of
-            distances to nearest restriction sites, over all aligned reads
-        - self.insert_sizes : stores a nucleotide-resolution histogram of
-            insert sizes, over all pairs for which an insert size was inferred
+        properties of the dataset.
         """
-        # Path to PDF file for summary plots
-        self.plot_file = plot_file
-        self.intersect_file = intersect_file
+        self.outdir = outdir           # Directory for output PDFs
+        self.resolution = resolution   # Resolution at which to compute scalings
 
-        # Store histogram bins for quick searching
-        self.distbins = np.logspace(math.log10(mindist), math.log10(maxdist), nbins)
-        self.closebins = np.logspace(math.log10(close_mindist), math.log10(close_maxdist), nbins)
-        self.sitebins = range(minsitedist, maxsitedist+1)
+        # Bins for computing the power-law scaling of contact probability
+        # as a function of distance
+        self.distbins = list(np.arange(mindist, maxdist, resolution))
+        self.distances = [ 0 for _ in self.distbins ]
 
-        # Initialize summary data; store 
-        self.filters = defaultdict(list)
-        self.distances     = [ 0 for _ in self.distbins ]
+        # Log-scale bins for measuring the ratio of alignment orientations
+        # (FF,FR,RF,RR) over close-range contacts (< close_maxdist).
+        nclosebins = math.ceil((np.log10(close_maxdist) - np.log10(close_mindist))
+                               / np.log10(binratio))
+        self.closebins = [ int(close_mindist * (binratio ** i))
+                           for i in range(int(nclosebins)) ]
         self.orientations  = [ { 'FF':0, 'FR':0, 'RF':0, 'RR':0 } for _ in self.closebins ]
+
+        # Strand ratios for different sets of pairs, each with a different minimum distance
+        self.distance_ratios = { d : { 'FF':0, 'FR':0, 'RF':0, 'RR':0 }
+                                 for d in [200, 500, 1000, 2000, 5000, 10000, 20000] }
+
+        # Log-scale bins for measuring distance dependence of dangling-ends contacts;
+        # bins range from close_mindist to maxdist
+        nlogdistbins = math.ceil((np.log10(maxdist) - np.log10(close_mindist))
+                             / np.log10(binratio))
+        self.logdistbins = [ int(close_mindist * (binratio ** i))
+                             for i in range(int(nlogdistbins)) ]
+        self.logdistances = [ 0 for _ in self.logdistbins ]
+
+        # Base-resolution bins for distances to nearest restriction sites
+        # and insert sizes
+        self.sitebins = range(minsitedist, maxsitedist+1)
         self.nearest_sites = [ 0 for _ in self.sitebins ]
+        self.contiguous_nearest_sites = [ 0 for _ in self.sitebins ]
+        self.chimeric_nearest_sites   = [ 0 for _ in self.sitebins ]
         self.insert_sizes  = [ 0 for _ in self.sitebins ]
 
-    #############################################
-    def __str__(self):
-        """
-        Return the string representations of the dictionaries.
-        """
-        return '%s\n%s\n%s\n%s\n%s' % (self.filters, self.distances,
-                                       self.orientations, self.nearest_sites, 
-                                       self.insert_sizes)
+        # Dictionary of tallies for various filters
+        self.filters = { 'unmapped' : 0,
+                         'low_MAPQ' : 0,
+                         'other_contig' : 0,
+                         'three_distal_loci' : 0,
+                         'many_alignments' : 0,
+                         'close_pair' : 0,
+                         'contiguous_undigested_site' : 0,
+                         'chimeric_undigested_site' : 0,
+                         'chimeric_three_fragments' : 0,
+                         'chimeric_supp_other_diff_chroms' : 0,
+                         'chimeric_three_chromosomes' : 0,
+                         'chimeric_bad_breakpoint' : 0,
+                         'chimeric_wrong_orientation' : 0,
+                         'chimeric_disordered' : 0,
+                         'same_fragment' : 0,
+                         'dangling_ends' : 0,
+                         'far_nearest_restriction_site' : 0,
+                         'wrong_insert_size' : 0 }
+        self.close_filters = { 'close_pair' : [],
+                               'far_nearest_restriction_site' : [],
+                               'same_fragment' : [],
+                               'wrong_insert_size' : [],
+                               'dangling_ends' : [] }
+        self.triple_filters = { 'three_distal_loci' : [],
+                                'chimeric_three_fragments' : [] }
+
+        # Histograms of contact distance for same-fragment or dangling-ends contacts
+        self.same_frag_distance = [ 0 for _ in self.closebins ]
+        self.same_frag_control  = [ 0 for _ in self.closebins ]
+        self.dang_ends_distance = [ 0 for _ in self.logdistbins ]
+        self.dang_ends_control  = [ 0 for _ in self.logdistbins ]
+
+        # Histograms of contact distance vs. n.r.s and insert size
+        self.nrs_vs_distance = { strands : { 'nearest_site' : [], 'distance' : [] }
+                                 for strands in ['FF','FR','RF','RR'] }
+        self.nrsabs_vs_distance = { strands : { 'nearest_site_abs' : [], 'distance' : [] }
+                                    for strands in ['FF','FR','RF','RR'] }
+        self.insert_vs_distance = { 'insert_size' : [], 'distance' : [] }
+
+        # Histograms of minimal contact distances over all three-fragment contacts
+        self.triple_min_distance = [ 0 for _ in self.closebins ]
+        self.triple_frag_distance = [ 0 for _ in range(200) ]
 
     #############################################
-    def addPair(self, pair):
+    def add_pair(self, pair):
         """
         Adds a read pair to the Hi-C dataset.
         """
         # Run through filters that apply to the pair
-        if pair.is_unmapped:               self.filters['unmapped'].append(pair.pair_id)
-        if pair.low_MAPQ:                  self.filters['low_MAPQ'].append(pair.pair_id)
-        if pair.other_contig:              self.filters['other_contig'].append(pair.pair_id)
-        if pair.multiple_loci:             self.filters['multiple_loci'].append(pair.pair_id)
-        if pair.close_pair:                self.filters['close_pair'].append(pair.pair_id)
-        if pair.undigested_site:           self.filters['undigested_site'].append(pair.pair_id)
-        if pair.multiple_fragments:        self.filters['multiple_fragments'].append(pair.pair_id)
-        if pair.same_fragment:             self.filters['same_fragment'].append(pair.pair_id)
-        if pair.far_from_restriction_site: self.filters['far_from_restriction_site'].append(pair.pair_id)
-        if pair.wrong_insert_size:         self.filters['wrong_insert_size'].append(pair.pair_id)
+        if pair.is_empty:
+            raise EmptyPairException('Empty pair should not be added to dataset')
+
+        if pair.is_unmapped:                     self.filters['unmapped'] += 1
+        if pair.low_MAPQ:                        self.filters['low_MAPQ'] += 1
+        if pair.other_contig:                    self.filters['other_contig'] += 1
+        if pair.many_alignments:                 self.filters['many_alignments'] += 1
+        if pair.contiguous_undigested_site:      self.filters['contiguous_undigested_site'] += 1
+        if pair.chimeric_undigested_site:        self.filters['chimeric_undigested_site'] += 1
+        if pair.chimeric_disordered:             self.filters['chimeric_disordered'] += 1
+        if pair.chimeric_supp_other_diff_chroms: self.filters['chimeric_supp_other_diff_chroms'] += 1
+        if pair.chimeric_three_chromosomes:      self.filters['chimeric_three_chromosomes'] += 1
+        if pair.chimeric_wrong_orientation:      self.filters['chimeric_wrong_orientation'] += 1
+        if pair.chimeric_bad_breakpoint:         self.filters['chimeric_bad_breakpoint'] += 1
+
+        if pair.close_pair:
+            self.filters['close_pair'] += 1
+            self.close_filters['close_pair'].append(pair.pair_id)
+        if pair.same_fragment:
+            self.filters['same_fragment'] += 1
+            self.close_filters['same_fragment'].append(pair.pair_id)
+        if pair.dangling_ends:
+            self.filters['dangling_ends'] += 1
+            self.close_filters['dangling_ends'].append(pair.pair_id)
+        if pair.far_nearest_restriction_site:
+            self.filters['far_nearest_restriction_site'] += 1
+            self.close_filters['far_nearest_restriction_site'].append(pair.pair_id)
+        if pair.wrong_insert_size:
+            self.filters['wrong_insert_size'] += 1
+            self.close_filters['wrong_insert_size'].append(pair.pair_id)
+        if pair.three_distal_loci:
+            self.filters['three_distal_loci'] += 1
+            self.triple_filters['three_distal_loci'].append(pair.pair_id)
+        if pair.chimeric_three_fragments:
+            self.filters['chimeric_three_fragments'] += 1
+            self.triple_filters['chimeric_three_fragments'].append(pair.pair_id)
 
         # Add distance, orientation, restriction site, and insert size information
-        if not (pair.is_empty or pair.is_unmapped or pair.low_MAPQ or pair.other_contig):
+        # for pairs that pass essential filters (non-empty, uniquely mapped to
+        # standard contigs, either contiguously or in a 3-way chimeric alignment)
+        if not pair.is_empty and not pair.is_unmapped and not pair.low_MAPQ\
+                             and not pair.other_contig and not pair.many_alignments\
+                             and not pair.chimeric_disordered\
+                             and not pair.chimeric_supp_other_diff_chroms\
+                             and not pair.chimeric_three_chromosomes\
+                             and not pair.chimeric_wrong_orientation\
+                             and not pair.chimeric_bad_breakpoint:
             # Exclude all cases for which positions are undefined
             if pair.pos1 is None or pair.pos2 is None:
                 return
-
+            # Compute distances and corresponding histogram bins for
+            # all intra-chromosomal contacts
             if pair.chrom1 == pair.chrom2:
                 dist = abs(pair.pos1 - pair.pos2)
                 distbin = bsearch(self.distbins, dist)
                 closebin = bsearch(self.closebins, dist)
-                self.distances[distbin] += 1
-                if pair.strand1 is None or pair.strand2 is None:
-                    pass
-                elif pair.strand1 and pair.strand2:
-                    self.orientations[closebin]['RR'] += 1
+                logdistbin = bsearch(self.logdistbins, dist)
+            else:   # For all inter-chromosomal contacts, set distance to be very large
+                dist = np.inf
+                distbin = closebin = logdistbin = None
+            # Tabulate distances for intra-chromosomal contacts passing filters
+            if distbin is not None and not pair.close_pair and not pair.same_fragment and\
+                    not pair.far_nearest_restriction_site and not pair.wrong_insert_size and\
+                    not pair.three_distal_loci:
+                self.distances[distbin] += (1. / (chrom_lengths[pair.chrom1] - dist - 1))
+            # Alignment orientation as a function of distance, for close pairs (< 100kb)
+            if closebin is None or pair.strand1 is None or pair.strand2 is None:
+                pass
+            elif pair.strand1 and pair.strand2:
+                self.orientations[closebin]['RR'] += 1.
+            elif pair.strand1:
+                self.orientations[closebin]['RF'] += 1.
+            elif pair.strand2:
+                self.orientations[closebin]['FR'] += 1.
+            else:
+                self.orientations[closebin]['FF'] += 1.
+            # Alignment orientation for different sets of reads with min. distance cutoffs
+            if 0 < dist < np.inf:
+                for d in [200, 500, 1000, 2000, 5000, 10000, 20000]:
+                    if dist > d:
+                        if pair.strand1 and pair.strand2:
+                            self.distance_ratios[d]['RR'] += 1.
+                        elif pair.strand1:
+                            self.distance_ratios[d]['RF'] += 1.
+                        elif pair.strand2:
+                            self.distance_ratios[d]['FR'] += 1.
+                        else:
+                            self.distance_ratios[d]['FF'] += 1.
+            # Tabulate contact distance for same-fragment pairs
+            if closebin is not None:
+                self.same_frag_control[closebin] += 1
+                if pair.same_fragment:
+                    self.same_frag_distance[closebin] += 1
+            # Tabulate contact distance for dangling-ends pairs 
+            if pair.dangling_ends:
+                if logdistbin is not None:
+                    self.dang_ends_distance[logdistbin] += 1
+            if logdistbin is not None:
+                self.dang_ends_control[logdistbin] += 1
+            # Distances to absolute nearest restriction sites
+            if pair.nearest_site_abs1 is not None and 0 < dist < np.inf:
+                if pair.strand1 and pair.strand2:
+                    self.nrsabs_vs_distance['RR']['nearest_site_abs'].append(pair.nearest_site_abs1)
+                    self.nrsabs_vs_distance['RR']['distance'].append(math.log10(dist))
                 elif pair.strand1:
-                    self.orientations[closebin]['RF'] += 1
+                    self.nrsabs_vs_distance['RF']['nearest_site_abs'].append(pair.nearest_site_abs1)
+                    self.nrsabs_vs_distance['RF']['distance'].append(math.log10(dist))
                 elif pair.strand2:
-                    self.orientations[closebin]['FR'] += 1
+                    self.nrsabs_vs_distance['FR']['nearest_site_abs'].append(pair.nearest_site_abs1)
+                    self.nrsabs_vs_distance['FR']['distance'].append(math.log10(dist))
                 else:
-                    self.orientations[closebin]['FF'] += 1 
-
-            neardist1 = abs(pair.pos1 - pair.nearest_site1)
-            neardist2 = abs(pair.pos2 - pair.nearest_site2)
-            try:
-                self.nearest_sites[neardist1 - self.sitebins[0]] += 1
-            except IndexError:
-                self.nearest_sites[self.sitebins[-1]] += 1
-            try:
-                self.nearest_sites[neardist2 - self.sitebins[0]] += 1
-            except IndexError:
-                self.nearest_sites[self.sitebins[-1]] += 1
-            try:
-                self.insert_sizes[pair.insert_size - self.sitebins[0]] += 1
-            except IndexError:
-                self.insert_sizes[self.sitebins[-1]] += 1
+                    self.nrsabs_vs_distance['FF']['nearest_site_abs'].append(pair.nearest_site_abs1)
+                    self.nrsabs_vs_distance['FF']['distance'].append(math.log10(dist))
+            if pair.nearest_site_abs2 is not None and 0 < dist < np.inf:
+                if pair.strand1 and pair.strand2:
+                    self.nrsabs_vs_distance['RR']['nearest_site_abs'].append(pair.nearest_site_abs2)
+                    self.nrsabs_vs_distance['RR']['distance'].append(math.log10(dist))
+                elif pair.strand1:
+                    self.nrsabs_vs_distance['RF']['nearest_site_abs'].append(pair.nearest_site_abs2)
+                    self.nrsabs_vs_distance['RF']['distance'].append(math.log10(dist))
+                elif pair.strand2:
+                    self.nrsabs_vs_distance['FR']['nearest_site_abs'].append(pair.nearest_site_abs2)
+                    self.nrsabs_vs_distance['FR']['distance'].append(math.log10(dist))
+                else:
+                    self.nrsabs_vs_distance['FF']['nearest_site_abs'].append(pair.nearest_site_abs2)
+                    self.nrsabs_vs_distance['FF']['distance'].append(math.log10(dist))
+            # Distances for three-fragment pairs
+            if pair.chimeric_three_fragments:
+                minbin = bsearch(self.closebins, min(pair.separations))
+                if minbin is not None:
+                    self.triple_min_distance[minbin] += 1
+            # Distances to nearest restriction sites and insert sizes
+            if pair.nearest_site1 is not None and pair.nearest_site2 is not None:
+                neardist1 = abs(pair.pos1 - pair.nearest_site1)
+                neardist2 = abs(pair.pos2 - pair.nearest_site2)
+                nearbin1 = neardist1 - self.sitebins[0] if neardist1 <= self.sitebins[-1] else None
+                nearbin2 = neardist2 - self.sitebins[0] if neardist2 <= self.sitebins[-1] else None
+                if nearbin1 is not None:
+                    self.nearest_sites[nearbin1] += 1
+                    if pair.chimeric == 0 or pair.chimeric == 2:
+                        self.contiguous_nearest_sites[nearbin1] += 1
+                    else:
+                        self.chimeric_nearest_sites[nearbin1] += 1
+                if nearbin2 is not None:
+                    self.nearest_sites[nearbin2] += 1
+                    if pair.chimeric == 0 or pair.chimeric == 1:
+                        self.contiguous_nearest_sites[nearbin2] += 1
+                    else:
+                        self.chimeric_nearest_sites[nearbin2] += 1
+                # Append data for distance to nearest restriction site vs. contact distance
+                if 0 < dist < np.inf:
+                    if pair.strand1 and pair.strand2:
+                        self.nrs_vs_distance['RR']['nearest_site'].append(neardist1)
+                        self.nrs_vs_distance['RR']['nearest_site'].append(neardist2)
+                        self.nrs_vs_distance['RR']['distance'].append(math.log10(dist))
+                        self.nrs_vs_distance['RR']['distance'].append(math.log10(dist))
+                    elif pair.strand1:
+                        self.nrs_vs_distance['RF']['nearest_site'].append(neardist1)
+                        self.nrs_vs_distance['RF']['nearest_site'].append(neardist2)
+                        self.nrs_vs_distance['RF']['distance'].append(math.log10(dist))
+                        self.nrs_vs_distance['RF']['distance'].append(math.log10(dist))
+                    elif pair.strand2:
+                        self.nrs_vs_distance['FR']['nearest_site'].append(neardist1)
+                        self.nrs_vs_distance['FR']['nearest_site'].append(neardist2)
+                        self.nrs_vs_distance['FR']['distance'].append(math.log10(dist))
+                        self.nrs_vs_distance['FR']['distance'].append(math.log10(dist))
+                    else:
+                        self.nrs_vs_distance['FF']['nearest_site'].append(neardist1)
+                        self.nrs_vs_distance['FF']['nearest_site'].append(neardist2)
+                        self.nrs_vs_distance['FF']['distance'].append(math.log10(dist))
+                        self.nrs_vs_distance['FF']['distance'].append(math.log10(dist))
+                # Do the same for insert size
+                insertbin = pair.insert_size - self.sitebins[0]\
+                            if pair.insert_size <= self.sitebins[-1] else None
+                if insertbin is not None:
+                    self.insert_sizes[insertbin] += 1
+                if 0 < dist < np.inf:
+                    self.insert_vs_distance['insert_size'].append(pair.insert_size)
+                    self.insert_vs_distance['distance'].append(math.log10(dist))
 
     #############################################
-    def plotStatistics(self):
+    def plot_summary_stats(self):
         """
         Plot the summary data and save to a PDF file with (relative) path given by
         self.plotfile.
         """
         # Initialize axes
-        fig, axes = plt.subplots(nrows=2, ncols=2)
+        fig, axes = plt.subplots(nrows=2, ncols=2, figsize=(10,9))
 
-        # Plot contact distance distribution on log-log axes
-        axes[0,0].loglog(self.distbins, self.distances)
-        axes[0,0].set_xlabel('Contact distance')
-        axes[0,0].set_ylabel('Probability')
-       
-        # Plot orientation distribution as a function of contact distance
-        close_total = [ sum(self.orientations[i].values()) for i in range(len(self.closebins)) ]
-        orientations_FF = [ self.orientations[i]['FF'] / float(close_total[i]) if close_total[i] > 0 else 0
-                            for i in range(len(self.closebins)) ]
-        orientations_FR = [ self.orientations[i]['FR'] / float(close_total[i]) if close_total[i] > 0 else 0
-                            for i in range(len(self.closebins)) ]
-        orientations_RF = [ self.orientations[i]['RF'] / float(close_total[i]) if close_total[i] > 0 else 0
-                            for i in range(len(self.closebins)) ]
-        orientations_RR = [ self.orientations[i]['RR'] / float(close_total[i]) if close_total[i] > 0 else 0
-                            for i in range(len(self.closebins)) ]
-        axes[0,1].semilogx(self.closebins, orientations_FF, label='FF')
-        axes[0,1].semilogx(self.closebins, orientations_FR, label='FR')
-        axes[0,1].semilogx(self.closebins, orientations_RF, label='RF')
-        axes[0,1].semilogx(self.closebins, orientations_RR, label='RR')
-        axes[0,1].set_xlabel('Contact distance')
-        axes[0,1].set_ylabel('Probability')
+        # Plot various statistics
+        self.plot_contact_distance(axes[0,0])
+        self.plot_orientations_vs_distance(axes[0,1])
+        #self.plot_distance_strand_ratios(axes[1,0])
+        self.plot_nearest_restriction_sites(axes[1,0])
+        self.plot_insert_sizes(axes[1,1])
 
-        # Plot distribution of distances to nearest restriction sites
-        axes[1,0].plot(self.sitebins, self.nearest_sites)
-        axes[1,0].set_xlabel('Distance to nearest restriction site')
-        axes[1,0].set_ylabel('Frequency')
+        # Title each plot with a letter
+        axes[0,0].set_title('A', loc='left', fontsize=18, fontweight='bold')
+        axes[0,1].set_title('B', loc='left', fontsize=18, fontweight='bold')
+        axes[1,0].set_title('C', loc='left', fontsize=18, fontweight='bold')
+        axes[1,1].set_title('D', loc='left', fontsize=18, fontweight='bold')
 
-        # Plot distribution of insert sizes
-        axes[1,1].plot(self.sitebins, self.insert_sizes)
-        axes[1,1].set_xlabel('Insert size')
-        axes[1,1].set_ylabel('Frequency')
-
-        # Save figure to given filename
-        plt.savefig(self.plot_file)
+        # Save figure to file
+        plt.tight_layout()
+        plt.savefig(os.path.join(self.outdir, 'summary.pdf'))
 
     #############################################
-    def plotFilterStatistics(self):
+    def plot_close_filter_stats(self):
+        """
+        Plot statistics for "close" filters:
+         - Distance distribution for same-fragment pairs
+         - Distribution of distances to nearest restriction sites vs. contact distance
+           for close-range pairs
+         - Distribution of insert sizes vs. contact distance for close-range pairs
+        """
+        # Initialize axes
+        fig, axes = plt.subplots(nrows=4, ncols=2, figsize=(10,14))
+
+        # Plot various statistics
+        self.plot_close_filter_venn(axes[0,0], axes[1,0], axes[2,0], axes[3,0])
+        self.plot_same_fragment_distances(axes[0,1])
+        self.plot_dangling_ends_distances(axes[1,1])
+        self.plot_nrs_vs_distance(axes[2,1])
+        self.plot_insert_size_vs_distance(axes[3,1])
+
+        # Title each plot with a letter
+        axes[0,0].set_title('A', loc='left', fontsize=18, fontweight='bold')
+        axes[0,1].set_title('B', loc='left', fontsize=18, fontweight='bold')
+        axes[1,0].set_title('C', loc='left', fontsize=18, fontweight='bold')
+        axes[1,1].set_title('D', loc='left', fontsize=18, fontweight='bold')
+        axes[2,0].set_title('E', loc='left', fontsize=18, fontweight='bold')
+        axes[2,1].set_title('F', loc='left', fontsize=18, fontweight='bold')
+        axes[3,0].set_title('G', loc='left', fontsize=18, fontweight='bold')
+        axes[3,1].set_title('H', loc='left', fontsize=18, fontweight='bold')
+
+        # Save figure to file
+        plt.tight_layout()
+        plt.savefig(os.path.join(self.outdir, 'close_filters.pdf'))
+
+    #############################################
+    def plot_nrs_vs_distance_stats(self):
+        """
+        Plot a separate figure with the distance-to-NRS vs. contact distance plot
+        and the strand orientation ratios of the respective categories.
+        """
+        # Initialize axes
+        fig, axes = plt.subplots(nrows=1, ncols=2, figsize=(10,4))
+
+        # Plot various statistics
+        self.plot_nrs_vs_distance_strand_ratios(axes[0])
+        self.plot_nrs_correlations(axes[1])
+
+        # Title each plot with a letter
+        axes[0].set_title('A', loc='left', fontsize=18, fontweight='bold')
+        axes[1].set_title('B', loc='left', fontsize=18, fontweight='bold')
+
+        # Save figure to file
+        plt.tight_layout()
+        plt.savefig(os.path.join(self.outdir, 'nrs_strand_ratios.pdf'))
+
+    #############################################
+    def plot_nrsabs_vs_distance_stats(self):
+        """
+        Plot a separate figure with the distance-to-absolute-NRS vs. contact distance plot
+        and the strand orientation ratios of the respective categories.
+        """
+        # Initialize axes
+        fig, axes = plt.subplots(nrows=1, ncols=2, figsize=(10,4))
+
+        # Plot various statistics
+        self.plot_nrsabs_vs_distance_strand_ratios(axes[1])
+        self.plot_nrsabs_vs_distance(axes[0])
+
+        # Title each plot with a letter
+        axes[0].set_title('A', loc='left', fontsize=18, fontweight='bold')
+        axes[1].set_title('B', loc='left', fontsize=18, fontweight='bold')
+
+        # Save figure to file
+        plt.tight_layout()
+        plt.savefig(os.path.join(self.outdir, 'nrsabs_strand_ratios.pdf'))
+
+    #############################################
+    def plot_close_filter_intersect(self):
         """
         Plot intersections of filters using pyUpSet.
         """
-        filters_dict = { k : pd.DataFrame(self.filters[k],
-                                          [ 0 for _ in range(len(self.filters[k])) ])
-                         for k in [ 'same_fragment', 'close_pair', 'undigested_site',
-                                    'far_from_restriction_site', 'wrong_insert_size',
-                                    'multiple_loci', 'multiple_fragments' ] }
+        filters_dict = { ''.join([ x[0] for x in k.split('_') ]).upper() :
+                         pd.DataFrame(self.close_filters[k],[ 0 for _ in self.close_filters[k] ])
+                         for k in self.close_filters }
         fig = plt.figure()
-        pyu.plot(filters_dict, inters_size_bounds=(10,np.inf))
-        plt.savefig(self.intersect_file)
+        pyu.plot(filters_dict, inters_size_bounds=(1,np.inf))
+        plt.tight_layout()
+        plt.savefig(os.path.join(self.outdir, 'close_filters_intersect.pdf'))
+
+    #############################################
+    def plot_triple_filter_stats(self):
+        """
+        Plot statistics for "close" filters:
+         - Distance distribution for same-fragment pairs
+         - Distribution of distances to nearest restriction sites vs. contact distance
+           for close-range pairs
+         - Distribution of insert sizes vs. contact distance for close-range pairs
+        """
+        # Initialize axes
+        fig, axes = plt.subplots(nrows=1, ncols=2, figsize=(10,4))
+
+        # Plot various statistics
+        self.plot_triple_filter_venn(axes[0])
+        self.plot_triple_min_distance(axes[1])
+
+        # Title each plot with a letter
+        axes[0].set_title('A', loc='left', fontsize=18, fontweight='bold')
+        axes[1].set_title('B', loc='left', fontsize=18, fontweight='bold')
+
+        # Save figure to file
+        plt.tight_layout()
+        plt.savefig(os.path.join(self.outdir, 'triple_filters.pdf'))
+
+    #############################################
+    def plot_triple_filter_intersect(self):
+        """
+        Plot intersections of filters using pyUpSet.
+        """
+        filters_dict = { ''.join([ x[0] for x in k.split('_') ]).upper() :
+                         pd.DataFrame(self.triple_filters[k], [ 0 for _ in self.triple_filters[k] ])
+                         for k in self.triple_filters }
+        fig = plt.figure()
+        pyu.plot(filters_dict, inters_size_bounds=(1,np.inf))
+        plt.tight_layout()
+        plt.savefig(os.path.join(self.outdir, 'triple_filters_intersect.pdf'))
+
+    #############################################
+    def plot_contact_distance(self, ax):
+        """
+        Plot distribution of contact distances.
+        """
+        total_dist = sum(self.distances)
+        ax.loglog(self.distbins, [ x / total_dist for x in self.distances ])
+        ax.set_xlabel('Contact distance')
+        ax.set_ylabel('Probability')
+
+    #############################################
+    def plot_distance_strand_ratios(self, ax):
+        """
+        Plot a stacked 100% horizontal bar plot showing the relative ratios
+        of the four strand orientations for various distance cutoffs.
+        """
+        # Normalize the values in each dict
+        print(self.distance_ratios)
+        for d in self.distance_ratios:
+            total = sum(self.distance_ratios[d].values())
+            for strand in self.distance_ratios[d]:
+                self.distance_ratios[d][strand] /= total
+
+        # Plot bar chart
+        distances = [200, 500, 1000, 2000, 5000, 10000, 20000]
+        y_cat = np.arange(len(distances))
+        totals = { d : 1. for d in distances }
+        for strand, strand_label, color in zip(['RR', 'RF', 'FR', 'FF'],
+                                               ['Left', 'Outer', 'Inner', 'Right'],
+                                               ["#8172B2", "#C44E52", "#55A868", "#4C72B0"]):
+            ax.barh(y_cat, [ totals[d] for d in distances ],
+                    align='center', color=color, label=strand_label,
+                    edgecolor=color, height=0.4)
+            for d in distances:
+                totals[d] -= self.distance_ratios[d][strand]
+
+        ax.set_xlabel('Fraction of read pairs')
+        ax.set_yticks(y_cat)
+        ax.set_yticklabels([ '> %d' % d for d in distances ])
+        ax.legend(bbox_to_anchor=(0., 0.92, 1., .102), loc=3,
+                  ncol=4, mode="expand", borderaxespad=0.)
+
+    #############################################
+    def plot_orientations_vs_distance(self, ax):
+        """
+        Plot distribution of alignment orientations (FF,FR,RF,RR) as
+        a function of contact distance.
+        """ 
+        orientations_FF = [ self.orientations[i]['FF'] for i in range(len(self.closebins)) ]
+        orientations_FR = [ self.orientations[i]['FR'] for i in range(len(self.closebins)) ]
+        orientations_RF = [ self.orientations[i]['RF'] for i in range(len(self.closebins)) ]
+        orientations_RR = [ self.orientations[i]['RR'] for i in range(len(self.closebins)) ]
+
+        ax.semilogx(self.closebins, np.log10(orientations_FF), label='Right')
+        ax.semilogx(self.closebins, np.log10(orientations_FR), label='Inner')
+        ax.semilogx(self.closebins, np.log10(orientations_RF), label='Outer')
+        ax.semilogx(self.closebins, np.log10(orientations_RR), label='Left')
+        ax.legend(loc='upper right')
+        ax.set_xlabel('Contact distance')
+        ax.set_ylabel('Log frequency')
+
+    #############################################
+    def plot_nearest_restriction_sites(self, ax):
+        """
+        Plot distribution of distances to nearest restriction sites.
+        """
+        ax.plot(self.sitebins, self.nearest_sites, label='All')
+        ax.plot(self.sitebins, self.contiguous_nearest_sites, alpha=0.7, label='Contig.')
+        ax.plot(self.sitebins, self.chimeric_nearest_sites, alpha=0.7, label='Chim.')
+        ax.set_xlim([0, 1000])
+        ax.legend(loc='upper right')
+        ax.set_xlabel('Distance to nearest restriction site')
+        ax.set_ylabel('Frequency')
+
+    #############################################
+    def plot_insert_sizes(self, ax):
+        """
+        Plot distribution of insert sizes.
+        """
+        ax.plot(self.sitebins, self.insert_sizes)
+        ax.set_xlabel('Insert size')
+        ax.set_ylabel('Frequency')
+
+    #############################################
+    def plot_close_filter_venn(self, ax1, ax2, ax3, ax4):
+        """
+        Plot distribution of distances for same-fragment pairs.
+        """
+        same_fragment = set(self.close_filters['same_fragment'])
+        dangling_ends = set(self.close_filters['dangling_ends'])
+        far_from_nrs  = set(self.close_filters['far_nearest_restriction_site'])
+        insert_size   = set(self.close_filters['wrong_insert_size'])
+        close_pair    = set(self.close_filters['close_pair'])
+        venn2([close_pair, same_fragment], ax=ax1, set_labels=('CP', 'SF'))
+        venn2([close_pair, dangling_ends], ax=ax2, set_labels=('CP', 'DE'))
+        venn2([close_pair, far_from_nrs], ax=ax3, set_labels=('CP', 'FNRS'))
+        venn2([far_from_nrs, insert_size], ax=ax4, set_labels=('FNRS', 'WIS'))
+
+    #############################################
+    def plot_same_fragment_distances(self, ax):
+        """
+        Plot distribution of distances for same-fragment pairs.
+        """
+        ax.semilogx(self.closebins, self.same_frag_control, label='Ctl')
+        ax.semilogx(self.closebins, self.same_frag_distance, label='SF')
+        ax.legend(loc='upper right')
+        ax.set_xlabel('Contact distance')
+        ax.set_ylabel('Frequency')
+
+    #############################################
+    def plot_dangling_ends_distances(self, ax):
+        """
+        Plot distribution of distances for dangling-ends pairs.
+        """
+        ax.semilogx(self.logdistbins, self.dang_ends_control, label='Ctl')
+        ax.semilogx(self.logdistbins, self.dang_ends_distance, label='DE')
+        ax.legend(loc='upper right')
+        ax.set_xlabel('Contact distance')
+        ax.set_ylabel('Frequency')
+    
+    #############################################
+    def plot_nrs_vs_distance(self, ax):
+        """
+        Plot a 2D histogram of contact distance vs. distance to nearest restriction site.
+        """
+        # Downsample if there are more than 40000 points, ensuring that NRSs
+        # corresponding to a read pair are sampled together
+        nrs_vs_distance_sample = { strands : { 'nearest_site' : [], 'distance' : [] }
+                                        for strands in ['FF','FR','RF','RR'] }
+        npoints = sum(len(self.nrs_vs_distance[strands]['nearest_site'])
+                      for strands in ['FF','FR','RF','RR'])
+        if npoints > 40000:
+            # Assuming the four strand combinations are split evenly (each 25%)
+            # downsample each set of points to 10000
+            for strand in ['FF', 'FR', 'RF', 'RR']:
+                idx = np.random.choice(range(0,len(self.nrs_vs_distance[strand]['nearest_site']),2),
+                                       5000)
+                for k in ['nearest_site', 'distance']:
+                    for i in idx:
+                        nrs_vs_distance_sample[strand][k].append(self.nrs_vs_distance[strand][k][i])
+                        nrs_vs_distance_sample[strand][k].append(self.nrs_vs_distance[strand][k][i+1])
+        else:
+            nrs_vs_distance_sample = self.nrs_vs_distance
+
+        # Plot each set of points
+        for strand, strand_label, color in zip(['FF', 'FR', 'RF', 'RR'],
+                                               ['Right', 'Inner', 'Outer', 'Left'],
+                                               ["#4C72B0", "#55A868", "#C44E52", "#8172B2"]):
+            ax.scatter(nrs_vs_distance_sample[strand]['nearest_site'],
+                       nrs_vs_distance_sample[strand]['distance'],
+                       marker='.', color=color, linewidth=0, alpha=0.5, label=strand_label)
+        ax.plot([750, 750], [0, 9], color='red')
+        ax.plot([0, 3000],  [3, 3], color='red')
+        ax.legend(loc='upper right')
+        ax.set_xlim([0, 3000])
+        ax.set_ylim([0, 9])
+        ax.set_xlabel('Distance to nearest restriction site')
+        ax.set_ylabel('Log contact distance')
+
+    #############################################
+    def plot_nrs_vs_distance_strand_ratios(self, ax):
+        """
+        Plot a stacked 100% horizontal bar plot showing the relative ratios
+        of the four strand orientations in the four regions of the NRS vs. distance
+        plot.
+        """
+        neither = { 'FF' : 0, 'FR' : 0, 'RF' : 0, 'RR' : 0 }
+        CP      = { 'FF' : 0, 'FR' : 0, 'RF' : 0, 'RR' : 0 }
+        FNRS    = { 'FF' : 0, 'FR' : 0, 'RF' : 0, 'RR' : 0 }
+        both    = { 'FF' : 0, 'FR' : 0, 'RF' : 0, 'RR' : 0 }
+        for strands in ['FF','FR','RF','RR']:
+            for n, d in zip(self.nrs_vs_distance[strands]['nearest_site'],
+                            self.nrs_vs_distance[strands]['distance']):
+                if n > 750 and d < 3:         # If distance to NRS is large and contact distance is small
+                    both[strands] += 1.
+                elif n > 750:                 # If only the distance to NRS is large
+                    FNRS[strands] += 1.
+                elif d < 3:                   # If only the contact distance is small
+                    CP[strands] += 1.
+                else:                         # Otherwise
+                    neither[strands] += 1.
+
+        # Normalize the values in each dict
+        for dct in [neither, CP, FNRS, both]:
+            total = sum(dct.values())
+            for k in dct:
+                dct[k] /= total
+
+        # Plot bar chart
+        y_cat = np.arange(4)
+        both_total = CP_total = FNRS_total = neither_total = 1.
+        for strand, strand_label, color in zip(['RR', 'RF', 'FR', 'FF'],
+                                               ['Left', 'Outer', 'Inner', 'Right'],
+                                               ["#8172B2", "#C44E52", "#55A868", "#4C72B0"]):
+            ax.barh(y_cat, [both_total, CP_total, FNRS_total, neither_total],
+                    align='center', color=color, label=strand_label,
+                    edgecolor=color, height=0.3)
+            both_total -= both[strand]
+            CP_total   -= CP[strand]
+            FNRS_total -= FNRS[strand]
+            neither_total -= neither[strand]
+
+        ax.set_xlabel('Fraction of read pairs')
+        ax.set_yticks(y_cat)
+        ax.set_yticklabels(['Both', 'CP', 'FNRS', 'Neither'])
+        ax.invert_yaxis()
+        ax.legend(bbox_to_anchor=(0., 0.92, 1., .102), loc=3,
+                  ncol=4, mode="expand", borderaxespad=0.)
+
+    #############################################
+    def plot_nrs_correlations(self, ax):
+        """
+        Plot the distances to NRS for all read pairs in a scatter plot.
+        """
+        # Use separate dictionaries to store close pairs vs. far pairs
+        nrs1_vs_nrs2_close = { strands : { 'nearest_site1' : [], 'nearest_site2' : [] }
+                               for strands in ['FF','FR','RF','RR'] }
+        nrs1_vs_nrs2_far   = { strands : { 'nearest_site1' : [], 'nearest_site2' : [] }
+                               for strands in ['FF','FR','RF','RR'] }
+        # Downsample to 40000 points total if necessary
+        npoints = sum(len(self.nrs_vs_distance[strands]['nearest_site'])
+                      for strands in ['FF','FR','RF','RR'])
+        for strand in ['FF', 'FR', 'RF', 'RR']:
+            if npoints > 40000:
+                idx = np.random.choice(range(0,len(self.nrs_vs_distance[strand]['nearest_site']),2),
+                                       5000)
+            else:
+                idx = range(0,len(self.nrs_vs_distance[strand]['nearest_site']),2)
+            for i in idx:
+                if self.nrs_vs_distance[strand]['distance'][i] >= 3:
+                    nrs1_vs_nrs2_far[strand]['nearest_site1'].append(
+                            self.nrs_vs_distance[strand]['nearest_site'][i])
+                    nrs1_vs_nrs2_far[strand]['nearest_site2'].append(
+                            self.nrs_vs_distance[strand]['nearest_site'][i+1])
+                else:
+                    nrs1_vs_nrs2_close[strand]['nearest_site1'].append(
+                            self.nrs_vs_distance[strand]['nearest_site'][i])
+                    nrs1_vs_nrs2_close[strand]['nearest_site2'].append(
+                            self.nrs_vs_distance[strand]['nearest_site'][i+1])
+
+        # Plot each set of points
+        for strand, strand_label, color in zip(['FF', 'FR', 'RF', 'RR'],
+                                               ['Right', 'Inner', 'Outer', 'Left'],
+                                               ["#4C72B0", "#55A868", "#C44E52", "#8172B2"]):
+            ax.scatter(nrs1_vs_nrs2_close[strand]['nearest_site1'],
+                       nrs1_vs_nrs2_close[strand]['nearest_site2'],
+                       marker='.', color=color, linewidth=0, alpha=0.5)
+            ax.scatter(nrs1_vs_nrs2_far[strand]['nearest_site1'],
+                       nrs1_vs_nrs2_far[strand]['nearest_site2'],
+                       marker='x', color=color, linewidth=2, alpha=1., label=strand_label)
+        ax.legend(loc='upper right')
+        ax.set_xlim([0, 3000])
+        ax.set_ylim([0, 3000])
+        ax.set_xlabel('Distance to NRS, read 1')
+        ax.set_ylabel('Distance to NRS, read 2')
+
+    #############################################
+    def plot_nrsabs_vs_distance(self, ax):
+        """
+        Plot a 2D histogram of contact distance vs. distance to absolute
+        nearest restriction site.
+        """
+        # Downsample if there are more than 40000 points
+        nrsabs_vs_distance_sample = { strands : { 'nearest_site_abs' : [], 'distance' : [] }
+                                      for strands in ['FF','FR','RF','RR'] }
+
+        npoints = sum(len(self.nrsabs_vs_distance[strands]['nearest_site_abs'])
+                      for strands in ['FF','FR','RF','RR'])
+        if npoints > 40000:
+            # Assuming the four strand combinations are split evenly (each 25%)
+            # downsample each set of points to 10000
+            for strand in ['FF', 'FR', 'RF', 'RR']:
+                idx = np.random.choice(range(0,len(self.nrsabs_vs_distance[strand]['nearest_site_abs']),2),
+                                       5000)
+                for k in ['nearest_site_abs', 'distance']:
+                    for i in idx:
+                        nrsabs_vs_distance_sample[strand][k].append(self.nrsabs_vs_distance[strand][k][i])
+                        nrsabs_vs_distance_sample[strand][k].append(self.nrsabs_vs_distance[strand][k][i+1])
+        else:
+            nrsabs_vs_distance_sample = self.nrsabs_vs_distance
+
+        # Plot each set of points
+        for strand, strand_label, color in zip(['FF', 'FR', 'RF', 'RR'],
+                                               ['Right', 'Inner', 'Outer', 'Left'],
+                                               ["#4C72B0", "#55A868", "#C44E52", "#8172B2"]):
+            ax.scatter(nrsabs_vs_distance_sample[strand]['nearest_site_abs'],
+                       nrsabs_vs_distance_sample[strand]['distance'],
+                       marker='.', color=color, linewidth=0, alpha=0.5, label=strand_label)
+        ax.legend(loc='upper right')
+        ax.set_xlim([0, 3000])
+        ax.set_ylim([0, 9])
+        ax.set_xlabel('Distance to absolute NRS')
+        ax.set_ylabel('Log contact distance')
+
+    #############################################
+    def plot_nrsabs_vs_distance_strand_ratios(self, ax):
+        """
+        Plot a stacked 100% horizontal bar plot showing the relative ratios
+        of the four strand orientations in the four regions of the NRS vs. distance
+        plot.
+        """
+        neither = { 'FF' : 0, 'FR' : 0, 'RF' : 0, 'RR' : 0 }
+        close_pair = { 'FF' : 0, 'FR' : 0, 'RF' : 0, 'RR' : 0 }
+        dang_ends = { 'FF' : 0, 'FR' : 0, 'RF' : 0, 'RR' : 0 }
+        both = { 'FF' : 0, 'FR' : 0, 'RF' : 0, 'RR' : 0 }
+        for strands in ['FF','FR','RF','RR']:
+            for n, d in zip(self.nrsabs_vs_distance[strands]['nearest_site_abs'],
+                            self.nrsabs_vs_distance[strands]['distance']):
+                if n > 5 and d < 3:           # If distance to NRS is large and contact distance is small
+                    both[strands] += 1.
+                elif n > 5:                   # If only the distance to NRS is large
+                    dang_ends[strands] += 1.
+                elif d < 3:                   # If only the contact distance is small
+                    close_pair[strands] += 1.
+                else:                         # Otherwise
+                    neither[strands] += 1.
+
+        # Normalize the values in each dict
+        for dct in [neither, close_pair, dang_ends, both]:
+            total = sum(dct.values())
+            for k in dct:
+                dct[k] /= total
+
+        # Plot bar chart
+        y_cat = np.arange(4)
+        both_total = close_pair_total = dang_ends_total = neither_total = 1.
+        for strand, strand_label, color in zip(['RR', 'RF', 'FR', 'FF'],
+                                               ['Left', 'Outer', 'Inner', 'Right'],
+                                               ["#8172B2", "#C44E52", "#55A868", "#4C72B0"]):
+            ax.barh(y_cat, [both_total,
+                            close_pair_total,
+                            dang_ends_total,
+                            neither_total],
+                    align='center', color=color, label=strand_label,
+                    edgecolor=color, height=0.3)
+            both_total -= both[strand]
+            close_pair_total -= close_pair[strand]
+            dang_ends_total -= dang_ends[strand]
+            neither_total -= neither[strand]
+
+        ax.set_xlabel('Fraction of read pairs')
+        ax.set_yticks(y_cat)
+        ax.set_yticklabels(['Both', 'CP', 'DE', 'Neither'])
+        ax.invert_yaxis()
+        ax.legend(bbox_to_anchor=(0., 0.92, 1., .102), loc=3,
+                  ncol=4, mode="expand", borderaxespad=0.)
+
+    #############################################
+    def plot_insert_size_vs_distance(self, ax):
+        """
+        Plot a 2D histogram of contact distance vs. insert size.
+        """
+        # Downsample if there are more than 40000 points
+        insert_vs_distance_sample = { 'insert_size' : [], 'distance' : [] }
+
+        if len(self.insert_vs_distance['insert_size']) > 40000:
+            idx = np.random.choice(range(len(self.insert_vs_distance['insert_size'])), 40000)
+            for k in self.insert_vs_distance:
+                insert_vs_distance_sample[k] = [ self.insert_vs_distance[k][i] for i in idx ]
+        else:
+            insert_vs_distance_sample = self.insert_vs_distance
+
+        ax.scatter(insert_vs_distance_sample['insert_size'],
+                   insert_vs_distance_sample['distance'],
+                   marker='.', linewidth=0, alpha=0.5)
+        ax.plot([1e3, 1e3], [0, 9], color='red')
+        ax.plot([0, 6000],  [3, 3], color='red') 
+
+        ax.set_xlim([0, 6000])
+        ax.set_ylim([0, 9])
+        ax.set_xlabel('Insert size')
+        ax.set_ylabel('Log contact distance')
+
+    #############################################
+    def plot_triple_filter_venn(self, ax):
+        """
+        Plot distribution of distances for same-fragment pairs.
+        """
+        three_distal_loci = set(self.triple_filters['three_distal_loci'])
+        three_fragments   = set(self.triple_filters['chimeric_three_fragments'])
+        venn2([three_distal_loci, three_fragments], ax=ax, set_labels=('3DL', '3F'))
+
+    #############################################
+    def plot_triple_min_distance(self, ax):
+        """
+        Plot distribution of distances for three-fragment pairs.
+        """
+        ax.semilogx(self.closebins, self.triple_min_distance)
+        ax.set_xlabel('Minimum contact distance')
+        ax.set_ylabel('Frequency')
 
 #############################################
 ####### MAIN SCRIPT FOR DATA ANALYSIS #######
 #############################################
-def parseBAM(bam, outbam, tabix, enzyme='MboI', mapq_threshold=30,
-             sep_threshold=1000, verbose=True):
+def parse_BAM(bam, outbam, tabix, enzyme='MboI', mapq_threshold=30,
+              sep_threshold=1000, verbose=True):
     """
     Parse input BAM file, process each pair and flag with necessary filters,
     and re-write each pair to an output BAM file.
+
+    Parameters
+    ----------
+    bam : string
+        Path to input BAM file
+    outbam : string
+        Path to output BAM file, to which filter flags will be reported
+    tabix : string
+        Path to Tabix file of restriction fragments
+    enzyme : string
+        Name of restriction enzyme used to create dataset
+    mapq_threshold : int
+        MAPQ score threshold for distinguishing unique alignments
+    sep_threshold : int
+        Base-pair threshold for distinguishing alignments that are "close" together
+    verbose : bool
+        Whether or not to print verbose output to stdout
     """
     curr_id = None
     curr_reads = []
     finished = False
-    count = 0
+    npairs = 0
     
+    # Initialize directory for output BAM file and figures
     outdir = outbam.split('.bam')[0] + '_figures/'
+    outtxt = os.path.join(outdir, 'summary.txt')
     if os.path.exists(outdir):
         shutil.rmtree(outdir)
     os.makedirs(outdir)
 
-    dataset = HiCDataset('%s/summary.pdf' % outdir,
-                         '%s/filters.pdf' % outdir, mindist=1e4, maxdist=1e9,
-                         close_mindist=1e2, close_maxdist=1e5, nbins=200,
-                         minsitedist=0, maxsitedist=2000)
-
+    dataset = HiCDataset(outdir, mindist=2e4, maxdist=1e9,
+                         close_mindist=10, close_maxdist=1e5, binratio=1.01,
+                         minsitedist=0, maxsitedist=2000, resolution=20000)
     fragments_file = pysam.TabixFile(tabix)
-    ligseq = getLigationSequence(enzyme)
-    cutlength = len(getRestrictionEnzyme(enzyme))
+    ligseq = get_ligation_sequence(enzyme)           # Ligation sequence for enzyme
+    cutlength = len(get_restriction_enzyme(enzyme))  # Cutter length of enzyme
 
     with pysam.AlignmentFile(bam, 'rb') as bf:
         outbf = pysam.AlignmentFile(outbam, 'wb', template=bf)
@@ -1197,16 +2107,16 @@ def parseBAM(bam, outbam, tabix, enzyme='MboI', mapq_threshold=30,
                                mapq_threshold=mapq_threshold,
                                sep_threshold=sep_threshold,
                                fragments_file=fragments_file)
-                dataset.addPair(pair)
-                pair.writeToFile(outbf)
+                npairs += 1
+                dataset.add_pair(pair)
+                pair.write_to_file(outbf)
                 # Update curr_id and re-initialize curr_reads
                 curr_id = read.query_name
                 curr_reads = []
-                count += 1
-                if count % 10000 == 0 and verbose:
-                    print('Processed %d read pairs. Flag statistics:' % count)
+                if npairs % 10000 == 0 and verbose:
+                    print('Processed %d read pairs. Flag statistics:' % npairs)
                     for f in dataset.filters:
-                        print('%s : %d' % (f, len(dataset.filters[f])))
+                        print('%s : %d' % (f, dataset.filters[f]))
 
             # Finally, gather alignment data from current read
             curr_reads.append(read)
@@ -1214,18 +2124,26 @@ def parseBAM(bam, outbam, tabix, enzyme='MboI', mapq_threshold=30,
         outbf.close()
 
     # Plot and print summary statistics
-    dataset.plotStatistics()
-    for f in dataset.filters:
-        print('%s : %d' % (f, len(dataset.filters[f])))
+    print('Summarizing and plotting filter statistics ...')
+    with open(outtxt, 'w') as f:
+        f.write('Number of pairs\t%d\n' % npairs)
+        for ft in dataset.filters:
+            f.write('%s\t%d\n' % (ft, dataset.filters[ft]))
+    dataset.plot_summary_stats()
+    dataset.plot_close_filter_stats()
+    dataset.plot_nrs_vs_distance_stats()
+    dataset.plot_nrsabs_vs_distance_stats()
+    dataset.plot_triple_filter_stats()
 
     # Plot intersections
     print('Plotting intersections of filters ...')
-    dataset.plotFilterStatistics()
+    dataset.plot_close_filter_intersect()
+    dataset.plot_triple_filter_intersect()
 
     fragments_file.close()
 
 #############################################
-def parseInputs():
+def parse_inputs():
     """
     Parse input arguments (input BAM file and output BAM file).
     """
@@ -1248,8 +2166,8 @@ def parseInputs():
 
 #############################################
 def main():
-    bam, outbam, tabix, verbose = parseInputs()
-    parseBAM(bam, outbam, tabix, verbose=verbose)
+    bam, outbam, tabix, verbose = parse_inputs()
+    parse_BAM(bam, outbam, tabix, verbose=verbose)
 
 #############################################
 if __name__ == '__main__':
